@@ -9,6 +9,7 @@
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
 use crate::collab::{Event, EventInit, Presence, EVENT_CHANNEL};
+use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::migrations::MIGRATIONS;
@@ -809,5 +810,97 @@ impl MetadataStore for PostgresMetadataStore {
                 }
             })
             .collect())
+    }
+
+    async fn create_suggestion(&self, init: SuggestionInit, ts: i64) -> Result<i64> {
+        let c = self.client().await?;
+        let row = c
+            .query_one(
+                "INSERT INTO suggestion(actor_id, session_id, branch, path, base_hash,
+                     proposed_hash, summary, status, created_ts)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                &[
+                    &init.actor_id,
+                    &init.session_id,
+                    &init.branch,
+                    &init.path,
+                    &init.base_hash,
+                    &init.proposed_hash,
+                    &init.summary,
+                    &SuggestionStatus::Pending.as_str(),
+                    &ts,
+                ],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn get_suggestion(&self, id: i64) -> Result<Option<Suggestion>> {
+        let c = self.client().await?;
+        let row = c
+            .query_opt(
+                "SELECT id, actor_id, session_id, branch, path, base_hash, proposed_hash,
+                     summary, status, created_ts, resolved_ts, resolved_by
+                 FROM suggestion WHERE id = $1",
+                &[&id],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_suggestion))
+    }
+
+    async fn list_suggestions(
+        &self,
+        status: Option<SuggestionStatus>,
+        path: Option<&str>,
+    ) -> Result<Vec<Suggestion>> {
+        let c = self.client().await?;
+        let st = status.map(|s| s.as_str());
+        let rows = c
+            .query(
+                "SELECT id, actor_id, session_id, branch, path, base_hash, proposed_hash,
+                     summary, status, created_ts, resolved_ts, resolved_by
+                 FROM suggestion
+                 WHERE ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR path = $2)
+                 ORDER BY id DESC",
+                &[&st, &path],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_suggestion).collect())
+    }
+
+    async fn resolve_suggestion(
+        &self,
+        id: i64,
+        status: SuggestionStatus,
+        resolved_by: Option<i64>,
+        ts: i64,
+    ) -> Result<bool> {
+        let c = self.client().await?;
+        let n = c
+            .execute(
+                "UPDATE suggestion SET status = $1, resolved_by = $2, resolved_ts = $3
+                 WHERE id = $4 AND status = 'pending'",
+                &[&status.as_str(), &resolved_by, &ts, &id],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+}
+
+fn row_to_suggestion(r: &Row) -> Suggestion {
+    let status: String = r.get(8);
+    Suggestion {
+        id: r.get(0),
+        actor_id: r.get(1),
+        session_id: r.get(2),
+        branch: r.get(3),
+        path: r.get(4),
+        base_hash: r.get(5),
+        proposed_hash: r.get(6),
+        summary: r.get(7),
+        status: SuggestionStatus::parse(&status).unwrap_or(SuggestionStatus::Pending),
+        created_ts: r.get(9),
+        resolved_ts: r.get(10),
+        resolved_by: r.get(11),
     }
 }

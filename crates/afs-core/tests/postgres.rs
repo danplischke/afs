@@ -5,7 +5,8 @@
 //!   AFS_PG_TEST_URL="host=/tmp/afs-pg/sock port=5433 user=postgres dbname=afs"
 
 use afs_core::{
-    EventInit, FileKind, Fs, InodeInit, MemStore, MetadataStore, PostgresMetadataStore, WriteCtx,
+    EventInit, FileKind, Fs, InodeInit, MemStore, MetadataStore, PostgresMetadataStore,
+    SuggestionStatus, WriteCtx,
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -145,6 +146,29 @@ async fn postgres_backend() {
         Some(human)
     );
     assert_eq!(fs.edit_ops(agent, Some(sess)).await.unwrap().len(), 1);
+
+    // --- agent-suggestion review queue over Postgres ------------------------
+    let sug = fs
+        .suggest(
+            afs_core::WriteCtx::session(agent, sess),
+            "/a/attr.txt",
+            b"one\ntwo\nthree\n",
+            Some("append a line"),
+        )
+        .await
+        .unwrap();
+    let pending = fs.list_suggestions(Some(SuggestionStatus::Pending), None).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, sug);
+    assert!(fs.suggestion_diff(sug).await.unwrap().contains("+three"));
+    // working tree untouched until accept
+    assert_eq!(&fs.read("/a/attr.txt").await.unwrap()[..], b"one\ntwo\n");
+    fs.accept_suggestion(sug, afs_core::WriteCtx::actor(human)).await.unwrap();
+    assert_eq!(&fs.read("/a/attr.txt").await.unwrap()[..], b"one\ntwo\nthree\n");
+    assert_eq!(
+        fs.get_suggestion(sug).await.unwrap().unwrap().status,
+        SuggestionStatus::Accepted
+    );
 
     // --- advisory lock + NOTIFY helpers -------------------------------------
     let pg = PostgresMetadataStore::connect(&dsn).await.unwrap();

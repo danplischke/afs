@@ -47,6 +47,11 @@ pub fn router(ws: Shared) -> Router {
         .route("/checkout", post(checkout))
         .route("/events", get(events))
         .route("/presence", get(presence))
+        .route("/suggestions", get(list_suggestions).post(create_suggestion))
+        .route("/suggestions/{id}", get(get_suggestion))
+        .route("/suggestions/{id}/diff", get(suggestion_diff))
+        .route("/suggestions/{id}/accept", post(accept_suggestion))
+        .route("/suggestions/{id}/reject", post(reject_suggestion))
         .route("/actors", post(create_actor))
         .route("/sessions", post(create_session))
         .with_state(ws)
@@ -83,7 +88,7 @@ impl IntoResponse for ApiError {
         use afs_sdk::AfsError::*;
         let status = match self.0 {
             NotFound(_) | ContentMissing(_) => StatusCode::NOT_FOUND,
-            AlreadyExists(_) => StatusCode::CONFLICT,
+            AlreadyExists(_) | Conflict(_) => StatusCode::CONFLICT,
             IsADirectory(_) | NotADirectory(_) | DirectoryNotEmpty(_) | InvalidPath(_)
             | InvalidArgument(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -327,6 +332,145 @@ async fn diff_file(
         path: q.path,
         diff,
     }))
+}
+
+// --- agent-suggestion review queue ------------------------------------------
+
+fn write_ctx(actor: i64, session: Option<i64>) -> WriteCtx {
+    match session {
+        Some(s) => WriteCtx::session(actor, s),
+        None => WriteCtx::actor(actor),
+    }
+}
+
+#[derive(Serialize)]
+struct SuggestionDto {
+    id: i64,
+    actor_id: i64,
+    session_id: Option<i64>,
+    branch: Option<String>,
+    path: String,
+    base_hash: Option<String>,
+    proposed_hash: Option<String>,
+    summary: Option<String>,
+    status: String,
+    created_ts: i64,
+    resolved_ts: Option<i64>,
+    resolved_by: Option<i64>,
+}
+
+impl From<afs_sdk::Suggestion> for SuggestionDto {
+    fn from(s: afs_sdk::Suggestion) -> Self {
+        Self {
+            id: s.id,
+            actor_id: s.actor_id,
+            session_id: s.session_id,
+            branch: s.branch,
+            path: s.path,
+            base_hash: s.base_hash,
+            proposed_hash: s.proposed_hash,
+            summary: s.summary,
+            status: s.status.as_str().to_string(),
+            created_ts: s.created_ts,
+            resolved_ts: s.resolved_ts,
+            resolved_by: s.resolved_by,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateSuggestQuery {
+    actor: i64,
+    session: Option<i64>,
+    path: String,
+    summary: Option<String>,
+    #[serde(default)]
+    delete: bool,
+}
+
+/// `POST /suggestions?actor=&path=&summary=` with the proposed bytes as the
+/// body (or `&delete=true` and an empty body to propose a deletion).
+async fn create_suggestion(
+    State(ws): State<Shared>,
+    Query(q): Query<CreateSuggestQuery>,
+    body: Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ctx = write_ctx(q.actor, q.session);
+    let id = if q.delete {
+        ws.suggest_delete(ctx, &q.path, q.summary.as_deref()).await?
+    } else {
+        ws.suggest(ctx, &q.path, &body, q.summary.as_deref()).await?
+    };
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+struct ListSuggestQuery {
+    status: Option<String>,
+    path: Option<String>,
+}
+
+async fn list_suggestions(
+    State(ws): State<Shared>,
+    Query(q): Query<ListSuggestQuery>,
+) -> ApiResult<Json<Vec<SuggestionDto>>> {
+    let status = match q.status.as_deref() {
+        Some(s) => Some(
+            afs_sdk::SuggestionStatus::parse(s)
+                .ok_or_else(|| afs_sdk::AfsError::InvalidArgument(format!("bad status {s}")))?,
+        ),
+        None => None,
+    };
+    let out = ws
+        .list_suggestions(status, q.path.as_deref())
+        .await?
+        .into_iter()
+        .map(SuggestionDto::from)
+        .collect();
+    Ok(Json(out))
+}
+
+async fn get_suggestion(
+    State(ws): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<SuggestionDto>> {
+    let s = ws
+        .get_suggestion(id)
+        .await?
+        .ok_or_else(|| afs_sdk::AfsError::NotFound(format!("suggestion #{id}")))?;
+    Ok(Json(s.into()))
+}
+
+async fn suggestion_diff(
+    State(ws): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let diff = ws.suggestion_diff(id).await?;
+    Ok(Json(json!({ "id": id, "diff": diff })))
+}
+
+#[derive(Deserialize)]
+struct ResolveQuery {
+    actor: i64,
+    session: Option<i64>,
+}
+
+async fn accept_suggestion(
+    State(ws): State<Shared>,
+    Path(id): Path<i64>,
+    Query(q): Query<ResolveQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ws.accept_suggestion(id, write_ctx(q.actor, q.session)).await?;
+    Ok(Json(json!({ "accepted": id })))
+}
+
+async fn reject_suggestion(
+    State(ws): State<Shared>,
+    Path(id): Path<i64>,
+    Query(q): Query<ResolveQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    ws.reject_suggestion(id, write_ctx(q.actor, q.session)).await?;
+    Ok(Json(json!({ "rejected": id })))
 }
 
 #[derive(Serialize)]

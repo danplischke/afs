@@ -9,7 +9,7 @@
 //! afs --workspace ./ws read /notes/a.txt
 //! ```
 
-use afs_sdk::{MergeOutcome, Workspace, WriteCtx};
+use afs_sdk::{MergeOutcome, SuggestionStatus, Workspace, WriteCtx};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
@@ -78,6 +78,46 @@ enum Cmd {
         /// Show a unified line diff of just this path.
         #[arg(long)]
         path: Option<String>,
+    },
+    /// Propose an edit to a path for review (bytes from `--from`/stdin),
+    /// attributed to `--actor`. `--delete` proposes removing the path instead.
+    Suggest {
+        path: String,
+        #[arg(long)]
+        actor: i64,
+        #[arg(long)]
+        session: Option<i64>,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long)]
+        from: Option<PathBuf>,
+        #[arg(long)]
+        delete: bool,
+    },
+    /// List suggestions (filter with `--status` and/or `--path`).
+    Suggestions {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Show a suggestion's unified diff (base → proposed).
+    SuggestionDiff { id: i64 },
+    /// Accept a pending suggestion, attributed to `--actor` as the approver.
+    Accept {
+        id: i64,
+        #[arg(long)]
+        actor: i64,
+        #[arg(long)]
+        session: Option<i64>,
+    },
+    /// Reject a pending suggestion.
+    Reject {
+        id: i64,
+        #[arg(long)]
+        actor: i64,
+        #[arg(long)]
+        session: Option<i64>,
     },
     /// Create a branch at HEAD, or list branches when no name is given.
     Branch { name: Option<String> },
@@ -345,6 +385,88 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Suggest {
+            path,
+            actor,
+            session,
+            summary,
+            from,
+            delete,
+        } => {
+            let ctx = match session {
+                Some(s) => WriteCtx::session(actor, s),
+                None => WriteCtx::actor(actor),
+            };
+            let id = if delete {
+                ws.suggest_delete(ctx, &path, summary.as_deref()).await?
+            } else {
+                let data = match from {
+                    Some(p) => std::fs::read(p)?,
+                    None => {
+                        let mut buf = Vec::new();
+                        std::io::stdin().read_to_end(&mut buf)?;
+                        buf
+                    }
+                };
+                ws.suggest(ctx, &path, &data, summary.as_deref()).await?
+            };
+            println!("suggestion #{id} created (pending review)");
+        }
+        Cmd::Suggestions { status, path } => {
+            let st = match status.as_deref() {
+                Some(s) => Some(
+                    SuggestionStatus::parse(s)
+                        .ok_or_else(|| anyhow::anyhow!("unknown status {s:?}"))?,
+                ),
+                None => None,
+            };
+            let list = ws.list_suggestions(st, path.as_deref()).await?;
+            if list.is_empty() {
+                println!("no suggestions");
+            }
+            for s in list {
+                println!(
+                    "#{:<4} {:<9} actor={} {}{}",
+                    s.id,
+                    s.status.as_str(),
+                    s.actor_id,
+                    s.path,
+                    s.summary.map(|m| format!("  — {m}")).unwrap_or_default(),
+                );
+            }
+        }
+        Cmd::SuggestionDiff { id } => {
+            let patch = ws.suggestion_diff(id).await?;
+            if patch.is_empty() {
+                println!("(no change)");
+            } else {
+                print!("{patch}");
+            }
+        }
+        Cmd::Accept {
+            id,
+            actor,
+            session,
+        } => {
+            let ctx = match session {
+                Some(s) => WriteCtx::session(actor, s),
+                None => WriteCtx::actor(actor),
+            };
+            ws.accept_suggestion(id, ctx).await?;
+            println!("accepted suggestion #{id}");
+        }
+        Cmd::Reject {
+            id,
+            actor,
+            session,
+        } => {
+            let ctx = match session {
+                Some(s) => WriteCtx::session(actor, s),
+                None => WriteCtx::actor(actor),
+            };
+            ws.reject_suggestion(id, ctx).await?;
+            println!("rejected suggestion #{id}");
+        }
         Cmd::Branch { name } => match name {
             Some(name) => {
                 ws.create_branch(&name).await?;

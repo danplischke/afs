@@ -5,6 +5,7 @@
 use crate::attribution::{Actor, ActorInit, EditOp, EditOpInit, ToolCallInit};
 use crate::collab::{Event, EventInit, Presence};
 use crate::error::Result;
+use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::types::{DirEntry, Hash, Ino, Inode, InodeInit};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -135,6 +136,28 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<()>;
     /// Sessions with `last_seen >= since_ts`, most recently seen first.
     async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>>;
+
+    // --- agent-suggestion review queue -----------------------------------
+
+    /// Record a new (pending) suggestion, returning its id.
+    async fn create_suggestion(&self, init: SuggestionInit, ts: i64) -> Result<i64>;
+    /// Fetch a suggestion by id.
+    async fn get_suggestion(&self, id: i64) -> Result<Option<Suggestion>>;
+    /// Suggestions filtered by `status` and/or `path`, newest first.
+    async fn list_suggestions(
+        &self,
+        status: Option<SuggestionStatus>,
+        path: Option<&str>,
+    ) -> Result<Vec<Suggestion>>;
+    /// Transition a *pending* suggestion to `status`, stamping who/when.
+    /// Returns `false` if it wasn't pending (already resolved / not found).
+    async fn resolve_suggestion(
+        &self,
+        id: i64,
+        status: SuggestionStatus,
+        resolved_by: Option<i64>,
+        ts: i64,
+    ) -> Result<bool>;
 }
 
 /// Delegating impl so `Arc<dyn MetadataStore>` (and `Arc<ConcreteStore>`) is
@@ -270,5 +293,29 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>> {
         (**self).active_presence(since_ts).await
+    }
+    async fn create_suggestion(&self, init: SuggestionInit, ts: i64) -> Result<i64> {
+        (**self).create_suggestion(init, ts).await
+    }
+    async fn get_suggestion(&self, id: i64) -> Result<Option<Suggestion>> {
+        (**self).get_suggestion(id).await
+    }
+    async fn list_suggestions(
+        &self,
+        status: Option<SuggestionStatus>,
+        path: Option<&str>,
+    ) -> Result<Vec<Suggestion>> {
+        (**self).list_suggestions(status, path).await
+    }
+    async fn resolve_suggestion(
+        &self,
+        id: i64,
+        status: SuggestionStatus,
+        resolved_by: Option<i64>,
+        ts: i64,
+    ) -> Result<bool> {
+        (**self)
+            .resolve_suggestion(id, status, resolved_by, ts)
+            .await
     }
 }

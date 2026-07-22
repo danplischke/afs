@@ -39,7 +39,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **NFS** | Serve the workspace over NFSv3 (`nfsserve`), mountable by any NFS client | ✅ done |
 | **Live feed** | Blocking Postgres `LISTEN/NOTIFY` push subscription; branch-scoped change feed | ✅ done |
 | **Diff** | Two-branch comparison by content address; per-file unified line diff (SDK/HTTP/CLI) | ✅ done |
-| Optional | Agent-suggestion review queue; packed-object git import | ⬜ |
+| **Suggestions** | Agent edits proposed for human review — accept (attributed) / reject, stale-base guard | ✅ done |
+| Optional | Packed-object git import | ⬜ |
 
 ## Layout
 
@@ -183,6 +184,29 @@ unchanged). Over HTTP: `GET /diff?from=main&to=feature` and
 or a raw commit hash. This is why "arbitrary chunks in storage" don't make
 comparison expensive: the metadata trees are the index, and content addressing
 makes *unchanged* free.
+
+### Agent suggestions
+
+An agent can *propose* an edit instead of applying it — a review queue for
+human+agent workspaces. The proposed bytes go straight into the content store
+(dedup'd, diffable), and only a small review record is added; the working tree
+doesn't change until a human accepts:
+
+```bash
+echo "patched" | afs --workspace "$WS" suggest /main.rs --actor "$AGENT" --summary "fix bug"
+afs --workspace "$WS" suggestions --status pending
+afs --workspace "$WS" suggestion-diff 1          # base → proposed, as a unified diff
+afs --workspace "$WS" accept 1 --actor "$HUMAN"  # applies it, credited to the agent
+```
+
+`accept` applies the edit **attributed to the authoring agent** (so blame is
+honest) and records the approver; it refuses with a conflict if the file moved
+since the proposal (a stale base). `reject` discards it. From Rust:
+`Workspace::suggest / suggest_delete / list_suggestions / suggestion_diff /
+accept_suggestion / reject_suggestion`. Over HTTP: `POST /suggestions`,
+`GET /suggestions`, `GET /suggestions/{id}/diff`, `POST /suggestions/{id}/accept`.
+It reuses the CAS, the diff engine, the change feed (a `suggest` event), and
+attribution — no new subsystems.
 
 ### HTTP API
 

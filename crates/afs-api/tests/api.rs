@@ -118,6 +118,61 @@ async fn versioning_over_http() {
     assert!(branches.as_array().unwrap().iter().any(|b| b["name"] == "main" && b["current"] == true));
 }
 
+fn post_bytes(uri: &str, body: &[u8]) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::from(body.to_vec()))
+        .unwrap()
+}
+
+fn post_empty(uri: &str) -> Request<Body> {
+    Request::builder().method("POST").uri(uri).body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn suggestion_review_over_http() {
+    let app = app().await;
+    let (_st, body) = send(&app, post_json("/actors", json!({"name": "claude", "agent": true, "model": "opus"}))).await;
+    let agent = as_json(&body)["id"].as_i64().unwrap();
+    let (_st, body) = send(&app, post_json("/actors", json!({"name": "dan"}))).await;
+    let human = as_json(&body)["id"].as_i64().unwrap();
+
+    send(&app, put_bytes("/files/notes.txt", b"one\ntwo\n")).await;
+
+    // agent proposes an edit
+    let (st, body) = send(
+        &app,
+        post_bytes(&format!("/suggestions?actor={agent}&path=/notes.txt&summary=fix"), b"one\nTWO\n"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let id = as_json(&body)["id"].as_i64().unwrap();
+
+    // it's pending and the working tree is untouched
+    let (_st, body) = send(&app, get("/suggestions?status=pending")).await;
+    let list = as_json(&body);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["actor_id"], agent);
+    assert_eq!(list[0]["summary"], "fix");
+    let (_st, body) = send(&app, get("/files/notes.txt")).await;
+    assert_eq!(body, b"one\ntwo\n");
+
+    // its diff renders base -> proposed
+    let (_st, body) = send(&app, get(&format!("/suggestions/{id}/diff"))).await;
+    let patch = as_json(&body)["diff"].as_str().unwrap().to_string();
+    assert!(patch.contains("-two") && patch.contains("+TWO"), "{patch}");
+
+    // human accepts -> applied
+    let (st, _) = send(&app, post_empty(&format!("/suggestions/{id}/accept?actor={human}"))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_st, body) = send(&app, get("/files/notes.txt")).await;
+    assert_eq!(body, b"one\nTWO\n");
+    let (_st, body) = send(&app, get(&format!("/suggestions/{id}"))).await;
+    assert_eq!(as_json(&body)["status"], "accepted");
+    assert_eq!(as_json(&body)["resolved_by"], human);
+}
+
 #[tokio::test]
 async fn diff_between_branches_over_http() {
     let app = app().await;

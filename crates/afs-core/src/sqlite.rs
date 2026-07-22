@@ -8,6 +8,7 @@
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
 use crate::collab::{Event, EventInit, Presence};
+use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::migrations::MIGRATIONS;
@@ -652,4 +653,96 @@ impl MetadataStore for SqliteMetadataStore {
         }
         Ok(out)
     }
+
+    async fn create_suggestion(&self, init: SuggestionInit, ts: i64) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO suggestion(actor_id, session_id, branch, path, base_hash,
+                 proposed_hash, summary, status, created_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                init.actor_id,
+                init.session_id,
+                init.branch,
+                init.path,
+                init.base_hash,
+                init.proposed_hash,
+                init.summary,
+                SuggestionStatus::Pending.as_str(),
+                ts,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn get_suggestion(&self, id: i64) -> Result<Option<Suggestion>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, actor_id, session_id, branch, path, base_hash, proposed_hash,
+                 summary, status, created_ts, resolved_ts, resolved_by
+             FROM suggestion WHERE id = ?1",
+            params![id],
+            row_to_suggestion,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    async fn list_suggestions(
+        &self,
+        status: Option<SuggestionStatus>,
+        path: Option<&str>,
+    ) -> Result<Vec<Suggestion>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, actor_id, session_id, branch, path, base_hash, proposed_hash,
+                 summary, status, created_ts, resolved_ts, resolved_by
+             FROM suggestion
+             WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR path = ?2)
+             ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map(
+            params![status.map(|s| s.as_str()), path],
+            row_to_suggestion,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn resolve_suggestion(
+        &self,
+        id: i64,
+        status: SuggestionStatus,
+        resolved_by: Option<i64>,
+        ts: i64,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE suggestion SET status = ?1, resolved_by = ?2, resolved_ts = ?3
+             WHERE id = ?4 AND status = 'pending'",
+            params![status.as_str(), resolved_by, ts, id],
+        )?;
+        Ok(n == 1)
+    }
+}
+
+fn row_to_suggestion(r: &rusqlite::Row) -> rusqlite::Result<Suggestion> {
+    let status: String = r.get(8)?;
+    Ok(Suggestion {
+        id: r.get(0)?,
+        actor_id: r.get(1)?,
+        session_id: r.get(2)?,
+        branch: r.get(3)?,
+        path: r.get(4)?,
+        base_hash: r.get(5)?,
+        proposed_hash: r.get(6)?,
+        summary: r.get(7)?,
+        status: SuggestionStatus::parse(&status).unwrap_or(SuggestionStatus::Pending),
+        created_ts: r.get(9)?,
+        resolved_ts: r.get(10)?,
+        resolved_by: r.get(11)?,
+    })
 }

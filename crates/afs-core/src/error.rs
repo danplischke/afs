@@ -26,6 +26,9 @@ pub enum AfsError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("content missing for hash {0}")]
     ContentMissing(String),
 

@@ -15,7 +15,8 @@ use std::sync::Arc;
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, FileKind, GcStats, Hash, Inode, MemStore,
-    MergeOutcome, PackStore, Presence, TieredStore, ToolCallInit, VersioningMode, WriteCtx,
+    MergeOutcome, PackStore, Presence, Suggestion, SuggestionInit, SuggestionStatus, TieredStore,
+    ToolCallInit, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -359,6 +360,59 @@ impl Workspace {
         self.emit("write", path, None, Some(ctx.actor), ctx.session)
             .await;
         Ok(())
+    }
+
+    /// Propose an edit to `path` for human review instead of applying it. The
+    /// bytes are stored now; the working tree changes only on accept. Returns
+    /// the suggestion id. (Records a `suggest` event on the feed.)
+    pub async fn suggest(
+        &self,
+        ctx: WriteCtx,
+        path: &str,
+        data: &[u8],
+        summary: Option<&str>,
+    ) -> Result<i64> {
+        self.fs.suggest(ctx, path, data, summary).await
+    }
+
+    /// Propose deleting `path`.
+    pub async fn suggest_delete(
+        &self,
+        ctx: WriteCtx,
+        path: &str,
+        summary: Option<&str>,
+    ) -> Result<i64> {
+        self.fs.suggest_delete(ctx, path, summary).await
+    }
+
+    /// Suggestions, optionally filtered by status and/or path, newest first.
+    pub async fn list_suggestions(
+        &self,
+        status: Option<SuggestionStatus>,
+        path: Option<&str>,
+    ) -> Result<Vec<Suggestion>> {
+        self.fs.list_suggestions(status, path).await
+    }
+
+    /// A single suggestion by id.
+    pub async fn get_suggestion(&self, id: i64) -> Result<Option<Suggestion>> {
+        self.fs.get_suggestion(id).await
+    }
+
+    /// Render a suggestion as a unified line diff (`base` → `proposed`).
+    pub async fn suggestion_diff(&self, id: i64) -> Result<String> {
+        self.fs.suggestion_diff(id).await
+    }
+
+    /// Accept a pending suggestion: apply it (attributed to the original author)
+    /// and mark it accepted. Errors if the file changed since it was proposed.
+    pub async fn accept_suggestion(&self, id: i64, approver: WriteCtx) -> Result<()> {
+        self.fs.accept_suggestion(id, approver).await
+    }
+
+    /// Reject a pending suggestion without applying it.
+    pub async fn reject_suggestion(&self, id: i64, approver: WriteCtx) -> Result<()> {
+        self.fs.reject_suggestion(id, approver).await
     }
 
     /// Per-line-range authorship for a path (human vs agent).

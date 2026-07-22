@@ -23,6 +23,7 @@ pub mod sqlite;
 pub mod types;
 mod util;
 pub mod version;
+pub mod vfs;
 
 pub use attribution::{Actor, ActorInit, ActorKind, BlameRange, EditOp, ToolCallInit, WriteCtx};
 pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};

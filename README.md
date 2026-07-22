@@ -26,7 +26,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | M5 | Real-`git` interop (SHA-256 objects, remote helper, LFS) | ⬜ |
 | **M6** | Per-actor attribution + blame (human vs agent), edit-op audit, revert | ✅ done |
 | **Sandbox** | Isolated overlayfs CoW runs, imported back as attributed changes | ✅ done |
-| M7–M9 | Access surfaces (FUSE/NFS/MCP/API), live collaboration, hardening | ⬜ |
+| **FUSE** | Mount the workspace as a POSIX filesystem (real read/write mount) | ✅ done |
+| M5, M7–M9 | git interop, more surfaces (NFS/MCP/API), live collaboration, hardening | ⬜ |
 
 ## Layout
 

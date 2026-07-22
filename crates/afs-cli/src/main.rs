@@ -125,6 +125,9 @@ enum Cmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Mount the workspace as a POSIX filesystem via FUSE (blocks until
+    /// unmounted; needs root + /dev/fuse).
+    Mount { mountpoint: PathBuf },
 }
 
 #[tokio::main]
@@ -348,6 +351,21 @@ async fn main() -> Result<()> {
                 println!("command exited {}; delta discarded", outcome.exit_code);
             }
             std::process::exit(outcome.exit_code);
+        }
+        Cmd::Mount { mountpoint } => {
+            if !afs_fuse::mountable() {
+                anyhow::bail!("FUSE mount unavailable here (needs root + /dev/fuse)");
+            }
+            std::fs::create_dir_all(&mountpoint)?;
+            println!(
+                "mounting afs at {} (unmount with `umount` to stop)",
+                mountpoint.display()
+            );
+            // The mount drives its own runtime, so run it off the async main thread.
+            let handle = std::thread::spawn(move || afs_fuse::mount(ws, &mountpoint));
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("mount thread panicked"))??;
         }
     }
     Ok(())

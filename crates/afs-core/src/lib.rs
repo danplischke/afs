@@ -45,6 +45,6 @@ pub use objectgraph::{
 };
 pub use objectstore::{ObjectContentStore, S3Config};
 pub use pack::{PackStore, DEFAULT_PACK_SIZE};
-pub use postgres::PostgresMetadataStore;
+pub use postgres::{EventSubscription, PostgresMetadataStore};
 pub use sqlite::SqliteMetadataStore;
 pub use types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};

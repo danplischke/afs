@@ -4,11 +4,23 @@
 //! Self-skips unless `AFS_PG_TEST_URL` points at a reachable database, e.g.
 //!   AFS_PG_TEST_URL="host=/tmp/afs-pg/sock port=5433 user=postgres dbname=afs"
 
-use afs_core::{FileKind, Fs, InodeInit, MemStore, MetadataStore, PostgresMetadataStore, WriteCtx};
+use afs_core::{
+    EventInit, FileKind, Fs, InodeInit, MemStore, MetadataStore, PostgresMetadataStore, WriteCtx,
+};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::time::timeout;
 
 fn dsn() -> Option<String> {
     std::env::var("AFS_PG_TEST_URL").ok()
+}
+
+/// Serializes the PG tests: they share one database and each resets the schema,
+/// so they must not overlap (cargo runs tests in a binary concurrently).
+fn pg_lock() -> &'static tokio::sync::Mutex<()> {
+    static L: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 /// Drop and recreate the `public` schema so each run starts clean.
@@ -33,6 +45,7 @@ async fn postgres_backend() {
         eprintln!("skipping postgres_backend: AFS_PG_TEST_URL unset");
         return;
     };
+    let _guard = pg_lock().lock().await;
     reset(&dsn).await;
 
     // --- metadata-store level ------------------------------------------------
@@ -138,4 +151,67 @@ async fn postgres_backend() {
     pg.advisory_lock(4242).await.unwrap();
     assert!(pg.advisory_unlock(4242).await.unwrap());
     pg.notify("afs_changes", "hello").await.unwrap();
+}
+
+/// Await the next batch with a timeout so a stuck subscription fails loudly.
+async fn recv_batch(sub: &mut afs_core::EventSubscription) -> Vec<afs_core::Event> {
+    timeout(Duration::from_secs(5), sub.recv())
+        .await
+        .expect("recv timed out")
+        .expect("recv errored")
+}
+
+/// The `LISTEN`-backed push subscription: a committed change wakes `recv()` and
+/// yields the new events in order; coalesced changes arrive in one batch; and a
+/// branch filter delivers only that branch's events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_change_feed_push() {
+    let Some(dsn) = dsn() else {
+        eprintln!("skipping postgres_change_feed_push: AFS_PG_TEST_URL unset");
+        return;
+    };
+    let _guard = pg_lock().lock().await;
+    reset(&dsn).await;
+    let meta = PostgresMetadataStore::connect(&dsn).await.unwrap();
+    meta.init().await.unwrap();
+
+    let ev = |kind: &str, path: &str, branch: &str| EventInit {
+        actor_id: None,
+        session_id: None,
+        kind: kind.to_string(),
+        path: path.to_string(),
+        detail: None,
+        branch: Some(branch.to_string()),
+    };
+
+    // Subscribe from the start; a separate handle appends -> we get pushed.
+    let mut sub = meta.subscribe(0, None).await.unwrap();
+    let writer = PostgresMetadataStore::connect(&dsn).await.unwrap();
+    writer.append_event(ev("write", "/a", "main"), 100).await.unwrap();
+
+    let batch = recv_batch(&mut sub).await;
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].path, "/a");
+    assert_eq!(batch[0].branch.as_deref(), Some("main"));
+
+    // Two changes before the next recv coalesce into one ordered batch.
+    writer.append_event(ev("write", "/b", "main"), 101).await.unwrap();
+    writer.append_event(ev("mkdir", "/c", "feature"), 102).await.unwrap();
+    let batch = recv_batch(&mut sub).await;
+    let paths: Vec<&str> = batch.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, vec!["/b", "/c"], "ordered by seq, both delivered");
+    drop(sub);
+
+    // A branch-filtered subscription only ever sees its own branch.
+    let mut feat = meta.subscribe(0, Some("feature".to_string())).await.unwrap();
+    let seen = recv_batch(&mut feat).await; // /c already exists on feature
+    assert!(seen.iter().all(|e| e.branch.as_deref() == Some("feature")));
+    assert!(seen.iter().any(|e| e.path == "/c"));
+
+    writer.append_event(ev("write", "/d", "main"), 103).await.unwrap();
+    writer.append_event(ev("write", "/e", "feature"), 104).await.unwrap();
+    let batch = recv_batch(&mut feat).await;
+    assert!(batch.iter().all(|e| e.branch.as_deref() == Some("feature")));
+    assert!(batch.iter().any(|e| e.path == "/e"));
+    assert!(batch.iter().all(|e| e.path != "/d"), "main change filtered out");
 }

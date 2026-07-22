@@ -17,6 +17,7 @@ fn event(actor: Option<i64>, kind: &str, path: &str) -> EventInit {
         kind: kind.to_string(),
         path: path.to_string(),
         detail: None,
+        branch: None,
     }
 }
 

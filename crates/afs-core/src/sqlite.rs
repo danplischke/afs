@@ -579,9 +579,9 @@ impl MetadataStore for SqliteMetadataStore {
     async fn append_event(&self, ev: EventInit, ts: i64) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![ev.actor_id, ev.session_id, ev.kind, ev.path, ev.detail, ts],
+            "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts, branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![ev.actor_id, ev.session_id, ev.kind, ev.path, ev.detail, ts, ev.branch],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -589,7 +589,7 @@ impl MetadataStore for SqliteMetadataStore {
     async fn events_since(&self, after_seq: i64, limit: i64) -> Result<Vec<Event>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT seq, actor_id, session_id, kind, path, detail, ts FROM fs_event
+            "SELECT seq, actor_id, session_id, kind, path, detail, ts, branch FROM fs_event
              WHERE seq > ?1 ORDER BY seq LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![after_seq, limit], |r| {
@@ -601,6 +601,7 @@ impl MetadataStore for SqliteMetadataStore {
                 path: r.get(4)?,
                 detail: r.get(5)?,
                 ts: r.get(6)?,
+                branch: r.get(7)?,
             })
         })?;
         let mut out = Vec::new();

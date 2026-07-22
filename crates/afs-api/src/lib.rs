@@ -349,11 +349,14 @@ struct EventDto {
     path: String,
     detail: Option<String>,
     ts: i64,
+    branch: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct EventsQuery {
     since: Option<i64>,
+    /// Restrict the feed to changes on this branch (the per-branch UI view).
+    branch: Option<String>,
 }
 
 async fn events(
@@ -364,6 +367,10 @@ async fn events(
         .watch(q.since.unwrap_or(0))
         .await?
         .into_iter()
+        .filter(|e| match &q.branch {
+            Some(b) => e.branch.as_deref() == Some(b.as_str()),
+            None => true,
+        })
         .map(|e| EventDto {
             seq: e.seq,
             actor_id: e.actor_id,
@@ -372,6 +379,7 @@ async fn events(
             path: e.path,
             detail: e.detail,
             ts: e.ts,
+            branch: e.branch,
         })
         .collect();
     Ok(Json(out))

@@ -74,21 +74,26 @@ async fn main() -> Result<()> {
             ws.mkdir_p(&path).await?;
         }
         Cmd::Write { path, from } => {
-            let data = match from {
-                Some(p) => std::fs::read(p)?,
+            // Convenience: ensure the parent directory exists before writing.
+            if let Some(parent) = path
+                .rsplit_once('/')
+                .map(|(p, _)| p)
+                .filter(|p| !p.is_empty())
+            {
+                ws.mkdir_p(parent).await?;
+            }
+            match from {
+                // Stream from a file so large files never need full residency.
+                Some(p) => {
+                    let file = std::fs::File::open(p)?;
+                    ws.write_reader(&path, file).await?;
+                }
                 None => {
                     let mut buf = Vec::new();
                     std::io::stdin().read_to_end(&mut buf)?;
-                    buf
-                }
-            };
-            // Convenience: ensure the parent directory exists before writing.
-            if let Some(parent) = path.rsplit_once('/').map(|(p, _)| p) {
-                if !parent.is_empty() {
-                    ws.mkdir_p(parent).await?;
+                    ws.write(&path, &buf).await?;
                 }
             }
-            ws.write(&path, &data).await?;
         }
         Cmd::Read { path } => {
             let bytes = ws.read(&path).await?;

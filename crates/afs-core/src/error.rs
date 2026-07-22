@@ -45,4 +45,10 @@ impl From<rusqlite::Error> for AfsError {
     }
 }
 
+impl From<object_store::Error> for AfsError {
+    fn from(e: object_store::Error) -> Self {
+        AfsError::Content(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, AfsError>;

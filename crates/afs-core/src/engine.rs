@@ -5,11 +5,12 @@
 //! story (no commits yet); later milestones layer commits/branches (M3), merge
 //! (M4), and attribution (M6) on top without changing this surface.
 
+use crate::chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest, chunk_bounds};
 use crate::content::ContentStore;
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
-use crate::types::{DirEntry, FileKind, INO_ROOT, Ino, Inode, InodeInit};
-use bytes::Bytes;
+use crate::types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};
+use bytes::{Bytes, BytesMut};
 
 const DIR_MODE: u32 = 0o040755;
 const FILE_MODE: u32 = 0o100644;
@@ -171,12 +172,9 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     // --- file operations --------------------------------------------------
 
-    /// Write `data` as the entire contents of `path`, creating the file if
-    /// needed. The body is stored as a single content-addressed blob.
-    pub async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
-        let (parent, name) = self.resolve_parent(path).await?;
-        self.ensure_dir(parent).await?;
-        let ino = match self.meta.lookup(parent, name).await? {
+    /// Resolve or create the file inode for `(parent, name)`.
+    async fn ensure_file(&self, parent: Ino, name: &str, path: &str) -> Result<Ino> {
+        match self.meta.lookup(parent, name).await? {
             Some(existing) => {
                 let inode = self
                     .meta
@@ -186,7 +184,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 if inode.kind == FileKind::Dir {
                     return Err(AfsError::IsADirectory(path.to_string()));
                 }
-                existing
+                Ok(existing)
             }
             None => {
                 let ino = self
@@ -197,15 +195,97 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                     })
                     .await?;
                 self.meta.add_dentry(parent, name, ino).await?;
-                ino
+                Ok(ino)
             }
+        }
+    }
+
+    /// Chunk `data` (content-defined), store each chunk, and write a manifest.
+    /// Returns `(manifest_hash, size)`; an empty body yields `(None, 0)`.
+    async fn store_body(&self, data: &[u8]) -> Result<(Option<Hash>, u64)> {
+        if data.is_empty() {
+            return Ok((None, 0));
+        }
+        let mut chunks = Vec::new();
+        for (off, len) in chunk_bounds(data) {
+            let hash = self.content.put(&data[off..off + len]).await?;
+            chunks.push(ChunkRef {
+                hash,
+                len: len as u32,
+            });
+        }
+        let manifest = Manifest {
+            size: data.len() as u64,
+            chunks,
         };
-        let hash = if data.is_empty() {
+        let mhash = self.content.put(&manifest.encode()).await?;
+        Ok((Some(mhash), manifest.size))
+    }
+
+    async fn load_manifest(&self, mhash: &Hash) -> Result<Manifest> {
+        let bytes = self.content.get(mhash).await?;
+        Manifest::decode(&bytes)
+    }
+
+    /// Write `data` as the entire contents of `path`, creating the file if needed.
+    /// The body is content-defined-chunked; unchanged chunks are deduplicated.
+    pub async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
+        let (parent, name) = self.resolve_parent(path).await?;
+        self.ensure_dir(parent).await?;
+        let ino = self.ensure_file(parent, name, path).await?;
+        let (mhash, size) = self.store_body(data).await?;
+        self.meta.set_content(ino, mhash, size).await?;
+        Ok(())
+    }
+
+    /// Write a file by streaming from a blocking reader, chunking incrementally so
+    /// large files never need to be fully resident. Creates the file if needed.
+    pub async fn write_reader<R>(&self, path: &str, reader: R) -> Result<()>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let (parent, name) = self.resolve_parent(path).await?;
+        self.ensure_dir(parent).await?;
+        let ino = self.ensure_file(parent, name, path).await?;
+
+        // Chunk on the blocking pool; deliver one chunk at a time to the async side.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<std::result::Result<Vec<u8>, String>>(8);
+        let handle = tokio::task::spawn_blocking(move || {
+            for item in fastcdc::v2020::StreamCDC::new(reader, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK) {
+                match item {
+                    Ok(chunk) => {
+                        if tx.blocking_send(Ok(chunk.data)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut chunks = Vec::new();
+        let mut size: u64 = 0;
+        while let Some(item) = rx.recv().await {
+            let data = item.map_err(AfsError::Content)?;
+            size += data.len() as u64;
+            let hash = self.content.put(&data).await?;
+            chunks.push(ChunkRef {
+                hash,
+                len: data.len() as u32,
+            });
+        }
+        let _ = handle.await;
+
+        let mhash = if size == 0 {
             None
         } else {
-            Some(self.content.put(data).await?)
+            let manifest = Manifest { size, chunks };
+            Some(self.content.put(&manifest.encode()).await?)
         };
-        self.meta.set_content(ino, hash, data.len() as u64).await?;
+        self.meta.set_content(ino, mhash, size).await?;
         Ok(())
     }
 
@@ -221,13 +301,21 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             FileKind::Dir => Err(AfsError::IsADirectory(path.to_string())),
             FileKind::Symlink => Err(AfsError::InvalidArgument(format!("{path} is a symlink"))),
             FileKind::File => match inode.content {
-                Some(h) => self.content.get(&h).await,
                 None => Ok(Bytes::new()),
+                Some(mhash) => {
+                    let manifest = self.load_manifest(&mhash).await?;
+                    let mut buf = BytesMut::with_capacity(manifest.size as usize);
+                    for c in &manifest.chunks {
+                        buf.extend_from_slice(&self.content.get(&c.hash).await?);
+                    }
+                    Ok(buf.freeze())
+                }
             },
         }
     }
 
-    /// Read the byte range `[off, off + len)` of a file.
+    /// Read the byte range `[off, off + len)` of a file, fetching only the chunks
+    /// that overlap the range.
     pub async fn read_range(&self, path: &str, off: u64, len: u64) -> Result<Bytes> {
         let ino = self.resolve(path).await?;
         let inode = self
@@ -240,10 +328,32 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 "{path} is not a regular file"
             )));
         }
-        match inode.content {
-            Some(h) => self.content.get_range(&h, off, len).await,
-            None => Ok(Bytes::new()),
+        let Some(mhash) = inode.content else {
+            return Ok(Bytes::new());
+        };
+        let manifest = self.load_manifest(&mhash).await?;
+        let end = off.saturating_add(len).min(manifest.size);
+        if off >= end {
+            return Ok(Bytes::new());
         }
+        let mut buf = BytesMut::with_capacity((end - off) as usize);
+        let mut pos: u64 = 0;
+        for c in &manifest.chunks {
+            let cstart = pos;
+            let cend = pos + c.len as u64;
+            pos = cend;
+            if cend <= off {
+                continue;
+            }
+            if cstart >= end {
+                break;
+            }
+            let from = off.max(cstart) - cstart;
+            let to = end.min(cend) - cstart;
+            let part = self.content.get_range(&c.hash, from, to - from).await?;
+            buf.extend_from_slice(&part);
+        }
+        Ok(buf.freeze())
     }
 
     /// Fetch inode metadata for a path.

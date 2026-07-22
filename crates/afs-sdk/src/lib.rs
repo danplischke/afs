@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
-    DirEntry, EditOp, FileKind, GcStats, Hash, Inode, MemStore, MergeOutcome, TieredStore,
-    ToolCallInit, VersioningMode, WriteCtx,
+    DirEntry, EditOp, EncryptedStore, FileKind, GcStats, Hash, Inode, MemStore, MergeOutcome,
+    TieredStore, ToolCallInit, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -40,6 +40,20 @@ impl Workspace {
     pub async fn open_local(db_path: impl AsRef<Path>, cas_dir: impl AsRef<Path>) -> Result<Self> {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
         let content: Content = Arc::new(LocalCasStore::open(cas_dir).await?);
+        Self::open(meta, content).await
+    }
+
+    /// SQLite metadata + a local content store **encrypted at rest** with a key
+    /// derived from `passphrase`. The same passphrase must be used on reopen;
+    /// the wrong one fails loudly rather than returning garbage.
+    pub async fn open_local_encrypted(
+        db_path: impl AsRef<Path>,
+        cas_dir: impl AsRef<Path>,
+        passphrase: &str,
+    ) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        let backend: Content = Arc::new(LocalCasStore::open(cas_dir).await?);
+        let content: Content = Arc::new(EncryptedStore::from_passphrase(backend, passphrase));
         Self::open(meta, content).await
     }
 

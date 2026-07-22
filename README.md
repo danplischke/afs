@@ -30,7 +30,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **MCP** | Serve the workspace to agents over MCP (JSON-RPC/stdio); writes attributed | ✅ done |
 | **M9 · GC** | Mark-and-sweep garbage collection: reclaim content no ref or live file references | ✅ done |
 | **M9 · Import** | Import a `tursodatabase/agentfs` SQLite DB (tree + audit) with agent attribution | ✅ done |
-| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, rest of hardening (encryption, benchmarks) | ⬜ |
+| **M9 · Encrypt** | Encryption at rest (XChaCha20-Poly1305), dedup-preserving, transparent to the engine | ✅ done |
+| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, benchmarks | ⬜ |
 
 ## Layout
 
@@ -115,6 +116,23 @@ default the imported tree is attributed to a synthetic `agentfs` agent actor, so
 afs --workspace "$WS" import-agentfs ./agent.db
 afs --workspace "$WS" blame /some/file     # agent:agentfs
 ```
+
+### Encryption at rest
+
+Content can be encrypted before it ever touches disk or object storage
+(XChaCha20-Poly1305), transparently to the engine — the address stays the
+plaintext hash, so metadata, versioning, and GC are unchanged, and **dedup still
+works** (convergent encryption). Opt in by setting `AFS_ENCRYPTION_KEY`:
+
+```bash
+export AFS_ENCRYPTION_KEY="correct horse battery staple"
+echo 'secret' | afs --workspace "$WS" write /notes.txt   # ciphertext on disk
+afs --workspace "$WS" read /notes.txt                     # plaintext back
+```
+
+The same key must be used every time; the wrong key fails loudly rather than
+returning garbage. From Rust, use `Workspace::open_local_encrypted` or wrap any
+`ContentStore` in an `EncryptedStore`.
 
 ## Development
 

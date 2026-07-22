@@ -190,7 +190,12 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.workspace)?;
     let db = cli.workspace.join("meta.db");
     let cas = cli.workspace.join("cas");
-    let ws = Workspace::open_local(&db, &cas).await?;
+    // Opt into encryption at rest by setting AFS_ENCRYPTION_KEY (kept out of
+    // argv/history); the same value must be used every time for this workspace.
+    let ws = match std::env::var("AFS_ENCRYPTION_KEY") {
+        Ok(k) if !k.is_empty() => Workspace::open_local_encrypted(&db, &cas, &k).await?,
+        _ => Workspace::open_local(&db, &cas).await?,
+    };
 
     match cli.cmd {
         Cmd::Init => {

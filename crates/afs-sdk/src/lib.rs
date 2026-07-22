@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, FileKind, GcStats, Hash, Inode, MemStore,
-    MergeOutcome, Presence, TieredStore, ToolCallInit, VersioningMode, WriteCtx,
+    MergeOutcome, PackStore, Presence, TieredStore, ToolCallInit, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -61,6 +61,38 @@ impl Workspace {
     pub async fn open_s3(db_path: impl AsRef<Path>, cfg: S3Config) -> Result<Self> {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
         let content: Content = Arc::new(ObjectContentStore::s3(cfg)?);
+        Self::open(meta, content).await
+    }
+
+    /// SQLite metadata + a **packed** local content store: chunks batched into
+    /// pack objects under `data_dir`, with the per-chunk index under `index_dir`.
+    /// The local mirror of [`Workspace::open_s3_packed`].
+    pub async fn open_local_packed(
+        db_path: impl AsRef<Path>,
+        data_dir: impl AsRef<Path>,
+        index_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        let data: Content = Arc::new(LocalCasStore::open(data_dir).await?);
+        let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
+        let content: Content = Arc::new(PackStore::new(data, index));
+        Self::open(meta, content).await
+    }
+
+    /// SQLite metadata + an S3-compatible object store whose chunks are batched
+    /// into **pack objects** (few large PUTs instead of many tiny ones), with the
+    /// per-chunk index kept in a local directory. This is the recommended layout
+    /// for object storage; call [`Workspace::flush`] (or `commit`) to seal the
+    /// open pack and [`Workspace::repack`] to reclaim deleted space.
+    pub async fn open_s3_packed(
+        db_path: impl AsRef<Path>,
+        cfg: S3Config,
+        index_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        let data: Content = Arc::new(ObjectContentStore::s3(cfg)?);
+        let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
+        let content: Content = Arc::new(PackStore::new(data, index));
         Self::open(meta, content).await
     }
 
@@ -213,6 +245,19 @@ impl Workspace {
     /// working tree. Run when the workspace is idle.
     pub async fn gc(&self) -> Result<GcStats> {
         self.fs.gc().await
+    }
+
+    /// Seal any buffered writes to durable storage (a no-op unless the content
+    /// backend batches, e.g. a packed store). `commit` flushes automatically.
+    pub async fn flush(&self) -> Result<()> {
+        self.fs.content.flush().await
+    }
+
+    /// Compact the content store, reclaiming space held by deleted objects;
+    /// returns the bytes reclaimed. Meaningful for a packed store; run after
+    /// `gc`. A no-op for in-place backends.
+    pub async fn repack(&self) -> Result<u64> {
+        self.fs.content.repack().await
     }
 
     // --- merge + locks ---------------------------------------------------

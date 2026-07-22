@@ -45,6 +45,24 @@ pub trait ContentStore: Send + Sync {
     /// Delete an object, returning the bytes freed. Idempotent: deleting an
     /// absent hash succeeds and frees `0`.
     async fn delete(&self, hash: &Hash) -> Result<u64>;
+
+    /// Flush any buffered writes to durable storage. Most backends write
+    /// immediately, so the default is a no-op; batching layers such as
+    /// [`PackStore`] override it to seal the open pack.
+    ///
+    /// [`PackStore`]: crate::pack::PackStore
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Compact storage, reclaiming space held by deleted objects, and return the
+    /// bytes reclaimed. A no-op for stores that delete in place; [`PackStore`]
+    /// rewrites packs to drop dead chunks.
+    ///
+    /// [`PackStore`]: crate::pack::PackStore
+    async fn repack(&self) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 /// A content-addressed store backed by a local directory.
@@ -194,6 +212,12 @@ impl<T: ContentStore + ?Sized> ContentStore for Arc<T> {
     }
     async fn delete(&self, hash: &Hash) -> Result<u64> {
         (**self).delete(hash).await
+    }
+    async fn flush(&self) -> Result<()> {
+        (**self).flush().await
+    }
+    async fn repack(&self) -> Result<u64> {
+        (**self).repack().await
     }
 }
 

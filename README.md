@@ -31,7 +31,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M9 · GC** | Mark-and-sweep garbage collection: reclaim content no ref or live file references | ✅ done |
 | **M9 · Import** | Import a `tursodatabase/agentfs` SQLite DB (tree + audit) with agent attribution | ✅ done |
 | **M9 · Encrypt** | Encryption at rest (XChaCha20-Poly1305), dedup-preserving, transparent to the engine | ✅ done |
-| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, benchmarks | ⬜ |
+| **M9 · Bench** | Criterion benchmarks over the chunk/write/read/commit hot paths + encryption overhead | ✅ done |
+| M7, M8 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration | ⬜ |
 
 ## Layout
 
@@ -139,6 +140,20 @@ returning garbage. From Rust, use `Workspace::open_local_encrypted` or wrap any
 ```bash
 cargo test --workspace
 ```
+
+### Benchmarks
+
+Criterion micro-benchmarks over the hot paths (chunk + BLAKE3 write, whole-file
+read, commit/tree building, and the cost of encryption) run over the in-memory
+store, so they reflect afs's own CPU cost rather than disk or network:
+
+```bash
+cargo bench -p afs-core
+```
+
+Indicative single-threaded numbers (release build, in-memory store): writes chunk
++ hash at ~1.3 GiB/s and reads reassemble at ~10 GiB/s; encryption at rest costs
+roughly 2× on write and is decrypt-bound on read.
 
 ## License
 

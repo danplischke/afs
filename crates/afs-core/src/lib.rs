@@ -22,6 +22,7 @@ pub mod metadata;
 pub mod migrations;
 pub mod objectgraph;
 pub mod objectstore;
+pub mod pack;
 pub mod postgres;
 pub mod sqlite;
 pub mod types;
@@ -43,6 +44,7 @@ pub use objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, Tree, TreeEntry, TreeKind, VersioningMode,
 };
 pub use objectstore::{ObjectContentStore, S3Config};
+pub use pack::{PackStore, DEFAULT_PACK_SIZE};
 pub use postgres::PostgresMetadataStore;
 pub use sqlite::SqliteMetadataStore;
 pub use types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};

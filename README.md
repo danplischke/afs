@@ -35,6 +35,7 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M5 · Remote** | `git-remote-afs` helper: real `git clone` / `fetch` / `push` over `afs://` | ✅ done |
 | **M8** | Live collaboration: change feed + presence, Postgres `LISTEN/NOTIFY` push | ✅ done |
 | **M7 · API** | HTTP/JSON surface: files, versioning, blame, change feed, presence | ✅ done |
+| **Pack layer** | Batch chunks into large pack objects for object storage; ranged reads + repack | ✅ done |
 | Optional | NFS surface; blocking Postgres `subscribe()` stream; packed-object git import | ⬜ |
 
 ## Layout
@@ -96,6 +97,26 @@ afs --workspace "$WS2" git import ./repo --branch main
 
 Large files can be exported as git-LFS pointer blobs (`--lfs-threshold <bytes>`),
 backed by afs's content-addressed chunk store.
+
+### Packing for object storage
+
+Content-defined chunking makes edits cheap (only changed chunks re-upload) but
+produces *many small objects* — and S3/R2/GCS bill per request. A **pack layer**
+batches chunks into large pack objects (few big PUTs instead of thousands of tiny
+ones) and keeps a small per-chunk index — `(pack, offset, len)` — so a read is a
+single ranged GET into a pack. Deploy the index on a fast local tier and the
+packs on object storage:
+
+```rust
+let ws = Workspace::open_s3_packed("meta.db", s3cfg, "index").await?;
+ws.write("/big.bin", &bytes).await?;
+ws.commit("me", "snapshot").await?;   // seals the open pack (also: ws.flush())
+let reclaimed = ws.repack().await?;   // rewrite packs to drop deleted chunks
+```
+
+Content addressing is preserved (a chunk's address is still its BLAKE3 hash), so
+metadata, versioning, dedup, and GC are unchanged. `Workspace::open_local_packed`
+packs onto local disk for testing.
 
 Or go over the wire: with `git-remote-afs` on `PATH`, the real `git` clones,
 fetches, and pushes an afs workspace through `afs://` URLs — no export step:

@@ -116,6 +116,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             timestamp: now_secs(),
         };
         let commit_hash = self.content.put(&commit.encode()).await?;
+        // Durability barrier: seal any open pack so the whole snapshot is
+        // persisted before the branch ref advances to it (no-op unless the
+        // content store batches writes).
+        self.content.flush().await?;
 
         let expect = parent.map(|h| h.to_hex());
         let swapped = self

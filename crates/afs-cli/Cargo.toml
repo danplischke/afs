@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 afs-agentfs = { version = "0.0.0", path = "../afs-agentfs" }
+afs-api = { version = "0.0.0", path = "../afs-api" }
 afs-fuse = { version = "0.0.0", path = "../afs-fuse" }
 afs-git = { version = "0.0.0", path = "../afs-git" }
 afs-mcp = { version = "0.0.0", path = "../afs-mcp" }

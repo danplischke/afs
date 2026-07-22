@@ -41,6 +41,8 @@ pub fn router(ws: Shared) -> Router {
         .route("/rename", post(rename))
         .route("/commit", post(commit))
         .route("/log", get(log))
+        .route("/diff", get(diff))
+        .route("/diff/file", get(diff_file))
         .route("/branches", get(list_branches).post(create_branch))
         .route("/checkout", post(checkout))
         .route("/events", get(events))
@@ -268,6 +270,63 @@ async fn log(State(ws): State<Shared>) -> ApiResult<Json<Vec<CommitDto>>> {
         })
         .collect();
     Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    from: String,
+    to: String,
+}
+
+#[derive(Serialize)]
+struct DiffEntryDto {
+    path: String,
+    status: &'static str,
+}
+
+/// `GET /diff?from=main&to=feature` — the changed-path list between two
+/// refs/commits (compared by content address).
+async fn diff(State(ws): State<Shared>, Query(q): Query<DiffQuery>) -> ApiResult<Json<Vec<DiffEntryDto>>> {
+    let out = ws
+        .diff(&q.from, &q.to)
+        .await?
+        .into_iter()
+        .map(|d| DiffEntryDto {
+            path: d.path,
+            status: match d.status {
+                afs_sdk::DiffStatus::Added => "added",
+                afs_sdk::DiffStatus::Modified => "modified",
+                afs_sdk::DiffStatus::Deleted => "deleted",
+            },
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct DiffFileQuery {
+    from: String,
+    to: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct DiffFileDto {
+    path: String,
+    diff: String,
+}
+
+/// `GET /diff/file?from=main&to=feature&path=/x` — a unified line diff of one
+/// path (empty `diff` when unchanged on both sides).
+async fn diff_file(
+    State(ws): State<Shared>,
+    Query(q): Query<DiffFileQuery>,
+) -> ApiResult<Json<DiffFileDto>> {
+    let diff = ws.diff_file(&q.from, &q.to, &q.path).await?;
+    Ok(Json(DiffFileDto {
+        path: q.path,
+        diff,
+    }))
 }
 
 #[derive(Serialize)]

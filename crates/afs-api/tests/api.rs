@@ -119,6 +119,38 @@ async fn versioning_over_http() {
 }
 
 #[tokio::test]
+async fn diff_between_branches_over_http() {
+    let app = app().await;
+    send(&app, put_bytes("/files/edit.txt", b"one\ntwo\n")).await;
+    send(&app, put_bytes("/files/keep.txt", b"same\n")).await;
+    send(&app, post_json("/commit", json!({"author": "dan", "message": "base"}))).await;
+    send(&app, post_json("/branches", json!({"name": "feature"}))).await;
+    send(&app, post_json("/checkout", json!({"name": "feature"}))).await;
+    send(&app, put_bytes("/files/edit.txt", b"one\nTWO\n")).await;
+    send(&app, put_bytes("/files/new.txt", b"added\n")).await;
+    send(&app, post_json("/commit", json!({"author": "dev", "message": "work"}))).await;
+
+    // changed-path list
+    let (st, body) = send(&app, get("/diff?from=main&to=feature")).await;
+    assert_eq!(st, StatusCode::OK);
+    let changes = as_json(&body);
+    let arr = changes.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "edit.txt modified + new.txt added; keep.txt unchanged");
+    assert!(arr.iter().any(|d| d["path"] == "/edit.txt" && d["status"] == "modified"));
+    assert!(arr.iter().any(|d| d["path"] == "/new.txt" && d["status"] == "added"));
+
+    // per-file unified diff
+    let (st, body) = send(&app, get("/diff/file?from=main&to=feature&path=/edit.txt")).await;
+    assert_eq!(st, StatusCode::OK);
+    let patch = as_json(&body)["diff"].as_str().unwrap().to_string();
+    assert!(patch.contains("-two") && patch.contains("+TWO"), "{patch}");
+
+    // unchanged file -> empty diff
+    let (_st, body) = send(&app, get("/diff/file?from=main&to=feature&path=/keep.txt")).await;
+    assert!(as_json(&body)["diff"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn attributed_write_shows_up_in_blame_and_feed() {
     let app = app().await;
 

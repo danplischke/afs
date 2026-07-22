@@ -15,9 +15,9 @@
 //! human-vs-agent attribution (`docs/DESIGN.md` §4d) stays in afs's own tables;
 //! git interop neither needs nor disturbs it.
 //!
-//! Out of scope for this milestone (tracked for follow-ups): the
-//! `git-remote-afs` pack-protocol remote helper, and reading packed (non-loose)
-//! objects on import.
+//! The `afs-remote-git` crate builds on this to provide `git-remote-afs`, so the
+//! real `git` can `clone`/`fetch`/`push` an afs workspace over `afs://`. Reading
+//! packed (non-loose) objects on import remains a follow-up.
 
 mod export;
 mod import;

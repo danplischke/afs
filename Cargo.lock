@@ -107,6 +107,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "afs-remote-git"
+version = "0.0.0"
+dependencies = [
+ "afs-git",
+ "afs-sdk",
+ "anyhow",
+ "libc",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "afs-sandbox"
 version = "0.0.0"
 dependencies = [

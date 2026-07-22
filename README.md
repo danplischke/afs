@@ -32,7 +32,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M9 · Import** | Import a `tursodatabase/agentfs` SQLite DB (tree + audit) with agent attribution | ✅ done |
 | **M9 · Encrypt** | Encryption at rest (XChaCha20-Poly1305), dedup-preserving, transparent to the engine | ✅ done |
 | **M9 · Bench** | Criterion benchmarks over the chunk/write/read/commit hot paths + encryption overhead | ✅ done |
-| M7, M8 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration | ⬜ |
+| **M5 · Remote** | `git-remote-afs` helper: real `git clone` / `fetch` / `push` over `afs://` | ✅ done |
+| M7, M8 | more surfaces (NFS/API), live collaboration | ⬜ |
 
 ## Layout
 
@@ -45,6 +46,7 @@ crates/
   afs-fuse/     # mount the workspace as a POSIX filesystem via FUSE
   afs-mcp/      # serve the workspace to agents over the Model Context Protocol
   afs-git/      # export/import genuine git objects — drive afs with the real `git`
+  afs-remote-git/ # `git-remote-afs` helper: clone/fetch/push over afs:// URLs
   afs-agentfs/  # import a tursodatabase/agentfs SQLite database into a workspace
 docs/DESIGN.md
 ```
@@ -91,6 +93,15 @@ afs --workspace "$WS2" git import ./repo --branch main
 
 Large files can be exported as git-LFS pointer blobs (`--lfs-threshold <bytes>`),
 backed by afs's content-addressed chunk store.
+
+Or go over the wire: with `git-remote-afs` on `PATH`, the real `git` clones,
+fetches, and pushes an afs workspace through `afs://` URLs — no export step:
+
+```bash
+git clone afs://"$WS" checkout      # clone an afs workspace with real git
+cd checkout && echo hi >> readme.md && git commit -am edit
+git push origin main                # the push lands back in the afs workspace
+```
 
 ### Reclaiming space
 

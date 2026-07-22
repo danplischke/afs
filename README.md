@@ -34,7 +34,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M9 · Bench** | Criterion benchmarks over the chunk/write/read/commit hot paths + encryption overhead | ✅ done |
 | **M5 · Remote** | `git-remote-afs` helper: real `git clone` / `fetch` / `push` over `afs://` | ✅ done |
 | **M8** | Live collaboration: change feed + presence, Postgres `LISTEN/NOTIFY` push | ✅ done |
-| M7 | more surfaces (NFS, general HTTP/API) | ⬜ |
+| **M7 · API** | HTTP/JSON surface: files, versioning, blame, change feed, presence | ✅ done |
+| Optional | NFS surface; blocking Postgres `subscribe()` stream; packed-object git import | ⬜ |
 
 ## Layout
 
@@ -49,6 +50,7 @@ crates/
   afs-git/      # export/import genuine git objects — drive afs with the real `git`
   afs-remote-git/ # `git-remote-afs` helper: clone/fetch/push over afs:// URLs
   afs-agentfs/  # import a tursodatabase/agentfs SQLite database into a workspace
+  afs-api/      # HTTP/JSON server over the workspace (axum)
 docs/DESIGN.md
 ```
 
@@ -132,6 +134,27 @@ afs --workspace "$WS" presence          # who's active right now
 From Rust: `Workspace::watch(cursor)`, `Workspace::presence(window_secs)`, and
 `Workspace::touch(actor, session, path)` for heartbeats. Postgres backends fire
 `NOTIFY afs_events` on every appended event.
+
+### HTTP API
+
+The same operations are available over HTTP/JSON — files as raw bytes, everything
+else as JSON — so any client can drive a workspace. Writes go through the SDK, so
+they land on the change feed and carry attribution just like every other surface.
+
+```bash
+afs --workspace "$WS" serve --addr 127.0.0.1:8080 &
+curl -X PUT --data-binary 'hello' http://127.0.0.1:8080/files/notes/a.txt
+curl http://127.0.0.1:8080/files/notes/a.txt          # -> hello
+curl -X POST -d '{"author":"dan","message":"first"}' http://127.0.0.1:8080/commit
+curl http://127.0.0.1:8080/log
+curl 'http://127.0.0.1:8080/events?since=0'            # the change feed
+```
+
+Routes: `GET/PUT/DELETE /files/*`, `GET/POST /dirs/*`, `GET /stat/*`,
+`GET /blame/*`, `POST /rename`, `POST /commit`, `GET /log`,
+`GET/POST /branches`, `POST /checkout`, `GET /events`, `GET /presence`,
+`POST /actors`, `POST /sessions`. An attributed write is
+`PUT /files/x?actor=<id>&session=<id>`.
 
 ### Coming from agentfs
 

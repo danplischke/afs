@@ -164,6 +164,12 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: std::net::SocketAddr,
     },
+    /// Serve the workspace over NFSv3 (blocks; mount with `-o vers=3,tcp,port=…`).
+    Nfs {
+        /// Address to bind, e.g. `127.0.0.1:11111`.
+        #[arg(long, default_value = "127.0.0.1:11111")]
+        addr: String,
+    },
     /// Import a `tursodatabase/agentfs` SQLite database into this workspace.
     ImportAgentfs {
         /// Path to the agentfs `.db` file.
@@ -523,6 +529,12 @@ async fn main() -> Result<()> {
         Cmd::Serve { addr } => {
             println!("serving afs at http://{addr} (Ctrl-C to stop)");
             afs_api::serve(std::sync::Arc::new(ws), addr).await?;
+        }
+        Cmd::Nfs { addr } => {
+            println!(
+                "serving afs over NFSv3 at {addr}\n  mount with: mount -t nfs -o vers=3,tcp,port=<port>,mountport=<port>,nolock <host>:/ /mnt"
+            );
+            afs_nfs::serve(ws, &addr).await?;
         }
         Cmd::ImportAgentfs {
             db,

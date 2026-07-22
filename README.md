@@ -36,7 +36,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M8** | Live collaboration: change feed + presence, Postgres `LISTEN/NOTIFY` push | ✅ done |
 | **M7 · API** | HTTP/JSON surface: files, versioning, blame, change feed, presence | ✅ done |
 | **Pack layer** | Batch chunks into large pack objects for object storage; ranged reads + repack | ✅ done |
-| Optional | NFS surface; blocking Postgres `subscribe()` stream; packed-object git import | ⬜ |
+| **NFS** | Serve the workspace over NFSv3 (`nfsserve`), mountable by any NFS client | ✅ done |
+| Optional | Blocking Postgres `subscribe()` stream; packed-object git import | ⬜ |
 
 ## Layout
 
@@ -48,6 +49,7 @@ crates/
   afs-sandbox/  # overlayfs copy-on-write sandbox runs, imported as attributed changes
   afs-fuse/     # mount the workspace as a POSIX filesystem via FUSE
   afs-mcp/      # serve the workspace to agents over the Model Context Protocol
+  afs-nfs/      # serve the workspace over NFSv3 (mountable by any NFS client)
   afs-git/      # export/import genuine git objects — drive afs with the real `git`
   afs-remote-git/ # `git-remote-afs` helper: clone/fetch/push over afs:// URLs
   afs-agentfs/  # import a tursodatabase/agentfs SQLite database into a workspace
@@ -176,6 +178,16 @@ Routes: `GET/PUT/DELETE /files/*`, `GET/POST /dirs/*`, `GET /stat/*`,
 `GET/POST /branches`, `POST /checkout`, `GET /events`, `GET /presence`,
 `POST /actors`, `POST /sessions`. An attributed write is
 `PUT /files/x?actor=<id>&session=<id>`.
+
+### NFS
+
+The workspace can also be served over **NFSv3** and mounted by any NFS client —
+the adapter maps onto the same inode-oriented operations the FUSE mount uses:
+
+```bash
+afs --workspace "$WS" nfs --addr 127.0.0.1:11111 &
+mount -t nfs -o vers=3,tcp,port=11111,mountport=11111,nolock 127.0.0.1:/ /mnt
+```
 
 ### Coming from agentfs
 

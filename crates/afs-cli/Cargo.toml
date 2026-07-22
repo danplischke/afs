@@ -13,6 +13,7 @@ afs-api = { version = "0.0.0", path = "../afs-api" }
 afs-fuse = { version = "0.0.0", path = "../afs-fuse" }
 afs-git = { version = "0.0.0", path = "../afs-git" }
 afs-mcp = { version = "0.0.0", path = "../afs-mcp" }
+afs-nfs = { version = "0.0.0", path = "../afs-nfs" }
 afs-sandbox = { version = "0.0.0", path = "../afs-sandbox" }
 afs-sdk = { version = "0.1.0", path = "../afs-sdk" }
 anyhow = "1.0.104"

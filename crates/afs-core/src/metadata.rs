@@ -2,6 +2,7 @@
 //! and attribution. Content bytes never live here — only content addresses do
 //! (`docs/DESIGN.md` §4b).
 
+use crate::attribution::{Actor, ActorInit, EditOp, EditOpInit, ToolCallInit};
 use crate::error::Result;
 use crate::types::{DirEntry, Hash, Ino, Inode, InodeInit};
 use async_trait::async_trait;
@@ -100,6 +101,22 @@ pub trait MetadataStore: Send + Sync {
 
     /// List held locks as `(path, owner, acquired_at)`.
     async fn list_locks(&self) -> Result<Vec<(String, String, i64)>>;
+
+    // --- attribution -----------------------------------------------------
+
+    async fn create_actor(&self, init: ActorInit) -> Result<i64>;
+    async fn get_actor(&self, id: i64) -> Result<Option<Actor>>;
+    async fn create_session(
+        &self,
+        actor_id: i64,
+        client: Option<&str>,
+        started_at: i64,
+    ) -> Result<i64>;
+    async fn record_tool_call(&self, tc: ToolCallInit) -> Result<i64>;
+    async fn append_edit_op(&self, op: EditOpInit) -> Result<i64>;
+    async fn list_edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>>;
+    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()>;
+    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>>;
 }
 
 /// Delegating impl so `Arc<dyn MetadataStore>` (and `Arc<ConcreteStore>`) is
@@ -186,5 +203,34 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn list_locks(&self) -> Result<Vec<(String, String, i64)>> {
         (**self).list_locks().await
+    }
+    async fn create_actor(&self, init: ActorInit) -> Result<i64> {
+        (**self).create_actor(init).await
+    }
+    async fn get_actor(&self, id: i64) -> Result<Option<Actor>> {
+        (**self).get_actor(id).await
+    }
+    async fn create_session(
+        &self,
+        actor_id: i64,
+        client: Option<&str>,
+        started_at: i64,
+    ) -> Result<i64> {
+        (**self).create_session(actor_id, client, started_at).await
+    }
+    async fn record_tool_call(&self, tc: ToolCallInit) -> Result<i64> {
+        (**self).record_tool_call(tc).await
+    }
+    async fn append_edit_op(&self, op: EditOpInit) -> Result<i64> {
+        (**self).append_edit_op(op).await
+    }
+    async fn list_edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>> {
+        (**self).list_edit_ops(actor_id, session_id).await
+    }
+    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()> {
+        (**self).set_line_blame(ino, runs).await
+    }
+    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>> {
+        (**self).get_line_blame(ino).await
     }
 }

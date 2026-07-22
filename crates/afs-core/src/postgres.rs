@@ -7,6 +7,7 @@
 //! for hot-inode critical sections, and `LISTEN/NOTIFY` change feeds (consumed by
 //! the watch API in M8).
 
+use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::migrations::MIGRATIONS;
@@ -367,7 +368,8 @@ impl MetadataStore for PostgresMetadataStore {
     async fn truncate_tree(&self) -> Result<()> {
         let c = self.client().await?;
         c.batch_execute(
-            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM inode WHERE ino <> 1;",
+            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM line_blame;
+             DELETE FROM inode WHERE ino <> 1;",
         )
         .await?;
         Ok(())
@@ -433,5 +435,149 @@ impl MetadataStore for PostgresMetadataStore {
             .into_iter()
             .map(|r| (r.get(0), r.get(1), r.get(2)))
             .collect())
+    }
+
+    async fn create_actor(&self, init: ActorInit) -> Result<i64> {
+        let c = self.client().await?;
+        let kind = init.kind.unwrap_or(ActorKind::System).as_str();
+        let now = now_secs();
+        let row = c
+            .query_one(
+                "INSERT INTO actor(kind, display_name, auth_subject, agent_model, agent_vendor, controller_actor_id, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+                &[
+                    &kind,
+                    &init.display_name,
+                    &init.auth_subject,
+                    &init.agent_model,
+                    &init.agent_vendor,
+                    &init.controller_actor_id,
+                    &now,
+                ],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn get_actor(&self, id: i64) -> Result<Option<Actor>> {
+        let c = self.client().await?;
+        let row = c
+            .query_opt(
+                "SELECT id, kind, display_name, auth_subject, agent_model, agent_vendor, controller_actor_id, created_at
+                 FROM actor WHERE id = $1",
+                &[&id],
+            )
+            .await?;
+        match row {
+            Some(r) => {
+                let kind_s: String = r.get(1);
+                let kind = ActorKind::parse(&kind_s)
+                    .ok_or_else(|| AfsError::Metadata(format!("bad actor kind {kind_s:?}")))?;
+                Ok(Some(Actor {
+                    id: r.get(0),
+                    kind,
+                    display_name: r.get(2),
+                    auth_subject: r.get(3),
+                    agent_model: r.get(4),
+                    agent_vendor: r.get(5),
+                    controller_actor_id: r.get(6),
+                    created_at: r.get(7),
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn create_session(
+        &self,
+        actor_id: i64,
+        client: Option<&str>,
+        started_at: i64,
+    ) -> Result<i64> {
+        let c = self.client().await?;
+        let row = c
+            .query_one(
+                "INSERT INTO session(actor_id, client, started_at, ended_at) VALUES ($1, $2, $3, NULL) RETURNING id",
+                &[&actor_id, &client, &started_at],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn record_tool_call(&self, tc: ToolCallInit) -> Result<i64> {
+        let c = self.client().await?;
+        let row = c
+            .query_one(
+                "INSERT INTO tool_calls(session_id, actor_id, name, parameters, result, error, started_at, completed_at, duration_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                &[
+                    &tc.session_id, &tc.actor_id, &tc.name, &tc.parameters, &tc.result, &tc.error,
+                    &tc.started_at, &tc.completed_at, &tc.duration_ms,
+                ],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn append_edit_op(&self, op: EditOpInit) -> Result<i64> {
+        let c = self.client().await?;
+        let row = c
+            .query_one(
+                "INSERT INTO edit_op(session_id, actor_id, tool_call_id, ino, path, op, byte_start, byte_len, pre_hash, post_hash, ts)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
+                &[
+                    &op.session_id, &op.actor_id, &op.tool_call_id, &op.ino, &op.path, &op.op,
+                    &op.byte_start, &op.byte_len, &op.pre_hash, &op.post_hash, &op.ts,
+                ],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn list_edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT id, session_id, actor_id, tool_call_id, ino, path, op, byte_start, byte_len, pre_hash, post_hash, ts
+                 FROM edit_op WHERE actor_id = $1 AND ($2::bigint IS NULL OR session_id = $2::bigint) ORDER BY id",
+                &[&actor_id, &session_id],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| EditOp {
+                id: r.get(0),
+                session_id: r.get(1),
+                actor_id: r.get(2),
+                tool_call_id: r.get(3),
+                ino: r.get(4),
+                path: r.get(5),
+                op: r.get(6),
+                byte_start: r.get(7),
+                byte_len: r.get(8),
+                pre_hash: r.get(9),
+                post_hash: r.get(10),
+                ts: r.get(11),
+            })
+            .collect())
+    }
+
+    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()> {
+        let c = self.client().await?;
+        c.execute(
+            "INSERT INTO line_blame(ino, runs) VALUES ($1, $2)
+             ON CONFLICT (ino) DO UPDATE SET runs = EXCLUDED.runs",
+            &[&ino, &runs],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>> {
+        let c = self.client().await?;
+        let row = c
+            .query_opt("SELECT runs FROM line_blame WHERE ino = $1", &[&ino])
+            .await?;
+        Ok(row.map(|r| r.get(0)))
     }
 }

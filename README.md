@@ -24,7 +24,7 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M3** | Opt-in versioning: commit DAG, branches, checkout, log, status | ✅ done |
 | **M4** | Three-way merge (diff3 text, chunk-granular binary), conflicts, locks | ✅ done |
 | M5 | Real-`git` interop (SHA-256 objects, remote helper, LFS) | ⬜ |
-| M6 | Per-actor attribution + blame | ⬜ |
+| **M6** | Per-actor attribution + blame (human vs agent), edit-op audit, revert | ✅ done |
 | M7–M9 | Access surfaces, live collaboration, hardening | ⬜ |
 
 ## Layout

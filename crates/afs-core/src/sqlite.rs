@@ -6,6 +6,7 @@
 //! `Send`. A production build would move DB work onto `spawn_blocking` (or use an
 //! async driver like sqlx, which M2 introduces alongside Postgres).
 
+use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::migrations::MIGRATIONS;
@@ -339,7 +340,8 @@ impl MetadataStore for SqliteMetadataStore {
     async fn truncate_tree(&self) -> Result<()> {
         let conn = self.lock();
         conn.execute_batch(
-            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM inode WHERE ino <> 1;",
+            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM line_blame;
+             DELETE FROM inode WHERE ino <> 1;",
         )?;
         Ok(())
     }
@@ -406,5 +408,163 @@ impl MetadataStore for SqliteMetadataStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    async fn create_actor(&self, init: ActorInit) -> Result<i64> {
+        let conn = self.lock();
+        let kind = init.kind.unwrap_or(ActorKind::System);
+        conn.execute(
+            "INSERT INTO actor(kind, display_name, auth_subject, agent_model, agent_vendor, controller_actor_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                kind.as_str(),
+                init.display_name,
+                init.auth_subject,
+                init.agent_model,
+                init.agent_vendor,
+                init.controller_actor_id,
+                now_secs()
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn get_actor(&self, id: i64) -> Result<Option<Actor>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT id, kind, display_name, auth_subject, agent_model, agent_vendor, controller_actor_id, created_at
+                 FROM actor WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match row {
+            Some((
+                id,
+                kind,
+                display_name,
+                auth_subject,
+                agent_model,
+                agent_vendor,
+                controller,
+                created_at,
+            )) => {
+                let kind = ActorKind::parse(&kind)
+                    .ok_or_else(|| AfsError::Metadata(format!("bad actor kind {kind:?}")))?;
+                Ok(Some(Actor {
+                    id,
+                    kind,
+                    display_name,
+                    auth_subject,
+                    agent_model,
+                    agent_vendor,
+                    controller_actor_id: controller,
+                    created_at,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn create_session(
+        &self,
+        actor_id: i64,
+        client: Option<&str>,
+        started_at: i64,
+    ) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO session(actor_id, client, started_at, ended_at) VALUES (?1, ?2, ?3, NULL)",
+            params![actor_id, client, started_at],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn record_tool_call(&self, tc: ToolCallInit) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO tool_calls(session_id, actor_id, name, parameters, result, error, started_at, completed_at, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                tc.session_id, tc.actor_id, tc.name, tc.parameters, tc.result, tc.error,
+                tc.started_at, tc.completed_at, tc.duration_ms
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn append_edit_op(&self, op: EditOpInit) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO edit_op(session_id, actor_id, tool_call_id, ino, path, op, byte_start, byte_len, pre_hash, post_hash, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                op.session_id, op.actor_id, op.tool_call_id, op.ino, op.path, op.op,
+                op.byte_start, op.byte_len, op.pre_hash, op.post_hash, op.ts
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn list_edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, actor_id, tool_call_id, ino, path, op, byte_start, byte_len, pre_hash, post_hash, ts
+             FROM edit_op WHERE actor_id = ?1 AND (?2 IS NULL OR session_id = ?2) ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![actor_id, session_id], |r| {
+            Ok(EditOp {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                actor_id: r.get(2)?,
+                tool_call_id: r.get(3)?,
+                ino: r.get(4)?,
+                path: r.get(5)?,
+                op: r.get(6)?,
+                byte_start: r.get(7)?,
+                byte_len: r.get(8)?,
+                pre_hash: r.get(9)?,
+                post_hash: r.get(10)?,
+                ts: r.get(11)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO line_blame(ino, runs) VALUES (?1, ?2)
+             ON CONFLICT(ino) DO UPDATE SET runs = excluded.runs",
+            params![ino, runs],
+        )?;
+        Ok(())
+    }
+
+    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT runs FROM line_blame WHERE ino = ?1",
+            params![ino],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 }

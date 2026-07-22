@@ -4,7 +4,7 @@
 //! Self-skips unless `AFS_PG_TEST_URL` points at a reachable database, e.g.
 //!   AFS_PG_TEST_URL="host=/tmp/afs-pg/sock port=5433 user=postgres dbname=afs"
 
-use afs_core::{FileKind, Fs, InodeInit, MemStore, MetadataStore, PostgresMetadataStore};
+use afs_core::{FileKind, Fs, InodeInit, MemStore, MetadataStore, PostgresMetadataStore, WriteCtx};
 use std::sync::Arc;
 
 fn dsn() -> Option<String> {
@@ -111,6 +111,27 @@ async fn postgres_backend() {
             .iter()
             .any(|(n, _)| n == "dev")
     );
+
+    // --- attribution over Postgres ------------------------------------------
+    let human = fs.create_human("dev-human", Some("dev@x")).await.unwrap();
+    let agent = fs
+        .create_agent("dev-agent", "m", Some(human))
+        .await
+        .unwrap();
+    let sess = fs.create_session(agent, None).await.unwrap();
+    fs.write_as(WriteCtx::session(agent, sess), "/a/attr.txt", b"one\ntwo\n")
+        .await
+        .unwrap();
+    assert_eq!(fs.blame("/a/attr.txt").await.unwrap()[0].actor.id, agent);
+    assert_eq!(
+        fs.get_actor(agent)
+            .await
+            .unwrap()
+            .unwrap()
+            .controller_actor_id,
+        Some(human)
+    );
+    assert_eq!(fs.edit_ops(agent, Some(sess)).await.unwrap().len(), 1);
 
     // --- advisory lock + NOTIFY helpers -------------------------------------
     let pg = PostgresMetadataStore::connect(&dsn).await.unwrap();

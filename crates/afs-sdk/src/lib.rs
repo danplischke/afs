@@ -102,6 +102,14 @@ impl Workspace {
         self.fs.rename(from, to).await
     }
 
+    pub async fn readlink(&self, path: &str) -> Result<String> {
+        self.fs.readlink(path).await
+    }
+
+    pub async fn symlink(&self, target: &str, linkpath: &str) -> Result<()> {
+        self.fs.symlink(target, linkpath).await.map(|_| ())
+    }
+
     // --- versioning ------------------------------------------------------
 
     /// Snapshot the working tree into a commit on the current branch.

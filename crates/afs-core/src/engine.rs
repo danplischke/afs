@@ -17,6 +17,7 @@ const FILE_MODE: u32 = 0o100644;
 const SYMLINK_MODE: u32 = 0o120777;
 
 /// A filesystem over a metadata store and a content store.
+#[derive(Clone)]
 pub struct Fs<M: MetadataStore, C: ContentStore> {
     pub meta: M,
     pub content: C,

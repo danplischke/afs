@@ -24,6 +24,11 @@ type Meta = Arc<dyn MetadataStore>;
 type Content = Arc<dyn ContentStore>;
 
 /// A workspace: a metadata store over a content store.
+///
+/// Cheap to clone — it's a pair of `Arc` handles to the shared backends, so
+/// clones share the same underlying store (useful for handing an owned
+/// `Workspace` to a mount/serve call while keeping one for the API).
+#[derive(Clone)]
 pub struct Workspace {
     fs: Fs<Meta, Content>,
 }

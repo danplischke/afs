@@ -1,0 +1,16 @@
+[package]
+name = "afs-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.91"
+blake3 = "1.8.5"
+bytes = "1.12.1"
+hex = "0.4.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

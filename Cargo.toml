@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/afs-core", "crates/afs-sdk", "crates/afs-cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/danplischke/afs"
+description = "afs — an agent-and-human filesystem: content-addressed storage, pluggable metadata DB, opt-in Git-style versioning, and per-actor edit attribution"
+
+# Milestone M0: skeleton + core traits (MetadataStore, ContentStore),
+# a SQLite metadata backend, a local content-addressed store, and the
+# working-tree engine. See docs/DESIGN.md and issue #1.

@@ -305,16 +305,21 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             FileKind::Symlink => Err(AfsError::InvalidArgument(format!("{path} is a symlink"))),
             FileKind::File => match inode.content {
                 None => Ok(Bytes::new()),
-                Some(mhash) => {
-                    let manifest = self.load_manifest(&mhash).await?;
-                    let mut buf = BytesMut::with_capacity(manifest.size as usize);
-                    for c in &manifest.chunks {
-                        buf.extend_from_slice(&self.content.get(&c.hash).await?);
-                    }
-                    Ok(buf.freeze())
-                }
+                Some(mhash) => self.content_bytes(&mhash).await,
             },
         }
+    }
+
+    /// Reassemble a file body from its manifest hash (the content address stored
+    /// on a file inode / tree entry). Used by `read` and by the diff API to
+    /// reconstruct a specific version's bytes.
+    pub(crate) async fn content_bytes(&self, mhash: &Hash) -> Result<Bytes> {
+        let manifest = self.load_manifest(mhash).await?;
+        let mut buf = BytesMut::with_capacity(manifest.size as usize);
+        for c in &manifest.chunks {
+            buf.extend_from_slice(&self.content.get(&c.hash).await?);
+        }
+        Ok(buf.freeze())
     }
 
     /// Read the byte range `[off, off + len)` of a file, fetching only the chunks

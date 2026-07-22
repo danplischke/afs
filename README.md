@@ -38,7 +38,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **Pack layer** | Batch chunks into large pack objects for object storage; ranged reads + repack | ✅ done |
 | **NFS** | Serve the workspace over NFSv3 (`nfsserve`), mountable by any NFS client | ✅ done |
 | **Live feed** | Blocking Postgres `LISTEN/NOTIFY` push subscription; branch-scoped change feed | ✅ done |
-| Optional | Packed-object git import | ⬜ |
+| **Diff** | Two-branch comparison by content address; per-file unified line diff (SDK/HTTP/CLI) | ✅ done |
+| Optional | Agent-suggestion review queue; packed-object git import | ⬜ |
 
 ## Layout
 
@@ -162,6 +163,26 @@ From Rust: `Workspace::watch(cursor)`, `Workspace::presence(window_secs)`, and
 change and yields the new events in order — a real push, not a poll. Each event
 is **branch-scoped**, so a UI showing `main` can filter the feed to one branch
 (`subscribe(seq, Some("feature"))`, or `GET /events?branch=feature`).
+
+### Comparing branches
+
+To show one branch against another — the core of a review UI — compare the two
+commits by **content address**, not by reading files. Each commit's tree is a
+`path → content-hash` map; equal hashes mean an identical file (a 32-byte
+compare, no chunk reads), so only the paths that actually differ ever get read:
+
+```bash
+afs --workspace "$WS" diff main feature                # changed-path list
+afs --workspace "$WS" diff main feature --path /x.rs   # one file's line diff
+```
+
+From Rust: `Workspace::diff(from, to)` returns the Added/Modified/Deleted paths;
+`Workspace::diff_file(from, to, path)` returns a unified line diff (empty when
+unchanged). Over HTTP: `GET /diff?from=main&to=feature` and
+`GET /diff/file?from=…&to=…&path=…`. `from`/`to` accept a branch name, `HEAD`,
+or a raw commit hash. This is why "arbitrary chunks in storage" don't make
+comparison expensive: the metadata trees are the index, and content addressing
+makes *unchanged* free.
 
 ### HTTP API
 

@@ -298,6 +298,73 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         Ok(diff_maps(&base, &work))
     }
 
+    /// Resolve a ref name (branch, `HEAD`, tag) or a raw commit hex to a commit
+    /// hash. This is how the diff API accepts either `"main"` or a commit id.
+    pub async fn resolve_commit(&self, name: &str) -> Result<Hash> {
+        if let Some(v) = self.meta.get_ref(name).await? {
+            // A branch/tag holds a commit hex; HEAD holds `ref:<branch>`.
+            let target = match v.strip_prefix("ref:") {
+                Some(branch) => self
+                    .meta
+                    .get_ref(branch)
+                    .await?
+                    .ok_or_else(|| AfsError::NotFound(format!("branch {branch}")))?,
+                None => v,
+            };
+            return Hash::from_hex(&target)
+                .ok_or_else(|| AfsError::Metadata("bad ref value".into()));
+        }
+        Hash::from_hex(name).ok_or_else(|| AfsError::NotFound(format!("ref or commit {name}")))
+    }
+
+    /// Flatten a commit's tree to a `path → content-hash` map (the whole file
+    /// set, addressed).
+    async fn flatten_commit(&self, commit_hash: Hash) -> Result<BTreeMap<String, Hash>> {
+        let commit = Commit::decode(&self.content.get(&commit_hash).await?)?;
+        let mut map = BTreeMap::new();
+        self.flatten_tree(commit.tree, String::new(), &mut map).await?;
+        Ok(map)
+    }
+
+    /// The set of paths that differ between two refs/commits (`from` → `to`),
+    /// each Added / Modified / Deleted.
+    ///
+    /// This is the cheap half of a UI branch comparison: it compares the two
+    /// trees by **content address**, so unchanged files (equal hash) cost a
+    /// 32-byte compare and never touch the chunk store. Only the paths this
+    /// returns need a real line diff — see [`Self::diff_file`].
+    pub async fn diff(&self, from: &str, to: &str) -> Result<Vec<DiffEntry>> {
+        let base = self.flatten_commit(self.resolve_commit(from).await?).await?;
+        let target = self.flatten_commit(self.resolve_commit(to).await?).await?;
+        Ok(diff_maps(&base, &target))
+    }
+
+    /// A unified line diff of one `path` between two refs/commits. Returns an
+    /// empty string when the file is byte-identical (or absent) on both sides.
+    /// Binary content is compared lossily as UTF-8.
+    pub async fn diff_file(&self, from: &str, to: &str, path: &str) -> Result<String> {
+        let base = self.flatten_commit(self.resolve_commit(from).await?).await?;
+        let target = self.flatten_commit(self.resolve_commit(to).await?).await?;
+        // Fast path: identical (or both-absent) content addresses — no reads.
+        if base.get(path) == target.get(path) {
+            return Ok(String::new());
+        }
+        let old = self.side_text(base.get(path)).await?;
+        let new = self.side_text(target.get(path)).await?;
+        Ok(diffy::create_patch(&old, &new).to_string())
+    }
+
+    /// Reconstruct one side of a file diff as text (empty if the path is absent).
+    async fn side_text(&self, hash: Option<&Hash>) -> Result<String> {
+        match hash {
+            Some(h) => {
+                let bytes = self.content_bytes(h).await?;
+                Ok(String::from_utf8_lossy(&bytes).into_owned())
+            }
+            None => Ok(String::new()),
+        }
+    }
+
     #[async_recursion]
     async fn flatten_working(
         &self,

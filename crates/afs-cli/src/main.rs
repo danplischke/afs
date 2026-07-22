@@ -70,6 +70,15 @@ enum Cmd {
     Log,
     /// Show working-tree changes relative to HEAD.
     Status,
+    /// Compare two refs/commits: changed paths, or one file's line diff with
+    /// `--path`. E.g. `afs diff main feature` or `afs diff main feature --path /x`.
+    Diff {
+        from: String,
+        to: String,
+        /// Show a unified line diff of just this path.
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Create a branch at HEAD, or list branches when no name is given.
     Branch { name: Option<String> },
     /// Switch the working tree to a branch.
@@ -317,6 +326,25 @@ async fn main() -> Result<()> {
                 println!("{} {}", d.status.sigil(), d.path);
             }
         }
+        Cmd::Diff { from, to, path } => match path {
+            Some(p) => {
+                let patch = ws.diff_file(&from, &to, &p).await?;
+                if patch.is_empty() {
+                    println!("{p}: unchanged between {from} and {to}");
+                } else {
+                    print!("{patch}");
+                }
+            }
+            None => {
+                let changes = ws.diff(&from, &to).await?;
+                if changes.is_empty() {
+                    println!("no differences between {from} and {to}");
+                }
+                for d in changes {
+                    println!("{} {}", d.status.sigil(), d.path);
+                }
+            }
+        },
         Cmd::Branch { name } => match name {
             Some(name) => {
                 ws.create_branch(&name).await?;

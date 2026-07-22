@@ -215,6 +215,18 @@ impl Workspace {
         self.fs.status().await
     }
 
+    /// Paths that differ between two refs/commits (`from` → `to`), compared by
+    /// content address — the cheap file-list half of a branch comparison.
+    pub async fn diff(&self, from: &str, to: &str) -> Result<Vec<DiffEntry>> {
+        self.fs.diff(from, to).await
+    }
+
+    /// A unified line diff of one path between two refs/commits (empty when
+    /// unchanged on both sides).
+    pub async fn diff_file(&self, from: &str, to: &str, path: &str) -> Result<String> {
+        self.fs.diff_file(from, to, path).await
+    }
+
     /// The current branch name (or `None` if detached).
     pub async fn current_branch(&self) -> Result<Option<String>> {
         self.fs.current_branch().await

@@ -8,6 +8,7 @@ name = "afs"
 path = "src/main.rs"
 
 [dependencies]
+afs-sandbox = { version = "0.0.0", path = "../afs-sandbox" }
 afs-sdk = { version = "0.1.0", path = "../afs-sdk" }
 anyhow = "1.0.104"
 clap = { version = "4.6.4", features = ["derive"] }

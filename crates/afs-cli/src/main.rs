@@ -111,6 +111,20 @@ enum Cmd {
     },
     /// Show per-line authorship (blame) for a file.
     Blame { path: String },
+    /// Run a command in an isolated copy-on-write sandbox over the workspace,
+    /// then import what it changed as an attributed commit (or `--discard`).
+    /// Usage: `afs sandbox --actor 1 -- <cmd> [args...]`
+    Sandbox {
+        /// Attribute imported changes to this actor id.
+        #[arg(long)]
+        actor: Option<i64>,
+        /// Discard the sandbox's changes instead of importing them.
+        #[arg(long)]
+        discard: bool,
+        /// The command to run (after `--`).
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -304,6 +318,36 @@ async fn main() -> Result<()> {
                     println!("{:>4}-{:<4}  {who}", r.line_start, r.line_end);
                 }
             }
+        }
+        Cmd::Sandbox {
+            actor,
+            discard,
+            cmd,
+        } => {
+            if !afs_sandbox::overlay_supported() {
+                anyhow::bail!(
+                    "unprivileged overlayfs is unavailable here (needs user-namespace overlay support)"
+                );
+            }
+            let tmp = cli
+                .workspace
+                .join(format!("sandbox-{}", std::process::id()));
+            let opts = afs_sandbox::RunOpts {
+                actor,
+                discard,
+                work_root: tmp.clone(),
+            };
+            let outcome = afs_sandbox::run(&ws, opts, &cmd).await?;
+            let _ = std::fs::remove_dir_all(&tmp);
+            if outcome.imported {
+                println!(
+                    "command exited {}; imported {} change(s)",
+                    outcome.exit_code, outcome.files_changed
+                );
+            } else {
+                println!("command exited {}; delta discarded", outcome.exit_code);
+            }
+            std::process::exit(outcome.exit_code);
         }
     }
     Ok(())

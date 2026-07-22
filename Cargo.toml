@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/afs-core", "crates/afs-sdk", "crates/afs-cli"]
+members = ["crates/afs-core", "crates/afs-sdk", "crates/afs-cli", "crates/afs-sandbox"]
 
 [workspace.package]
 version = "0.0.0"

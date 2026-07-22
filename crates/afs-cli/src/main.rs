@@ -143,6 +143,20 @@ enum Cmd {
     },
     /// Reclaim content unreachable from any branch or the working tree.
     Gc,
+    /// Import a `tursodatabase/agentfs` SQLite database into this workspace.
+    ImportAgentfs {
+        /// Path to the agentfs `.db` file.
+        db: PathBuf,
+        /// Actor name for the imported tree + audit.
+        #[arg(long, default_value = "agentfs")]
+        agent_name: String,
+        /// Import without attributing files to the agent actor.
+        #[arg(long)]
+        no_attribution: bool,
+        /// Skip replaying agentfs's tool-call audit log.
+        #[arg(long)]
+        no_tool_calls: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -449,6 +463,23 @@ async fn main() -> Result<()> {
             println!(
                 "gc: kept {} object(s), deleted {} ({} bytes freed)",
                 stats.reachable, stats.deleted, stats.bytes_freed
+            );
+        }
+        Cmd::ImportAgentfs {
+            db,
+            agent_name,
+            no_attribution,
+            no_tool_calls,
+        } => {
+            let opts = afs_agentfs::ImportOptions {
+                attribute: !no_attribution,
+                agent_name,
+                import_tool_calls: !no_tool_calls,
+            };
+            let s = afs_agentfs::import_agentfs(&ws, &db, &opts).await?;
+            println!(
+                "imported {} dir(s), {} file(s), {} symlink(s), {} tool call(s) ({} bytes)",
+                s.dirs, s.files, s.symlinks, s.tool_calls, s.bytes
             );
         }
     }

@@ -27,6 +27,13 @@ pub struct SqliteMetadataStore {
 impl SqliteMetadataStore {
     /// Open (creating if needed) a database file at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        // Create the parent directory so a workspace path "just works", matching
+        // LocalCasStore::open (SQLite itself won't create missing directories).
+        if let Some(parent) = path.as_ref().parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         Ok(Self {

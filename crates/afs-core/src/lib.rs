@@ -8,17 +8,29 @@
 //!
 //! See `docs/DESIGN.md` for the full architecture and the milestone roadmap.
 
+pub mod chunk;
 pub mod content;
 pub mod engine;
 pub mod error;
 pub mod metadata;
+pub mod migrations;
+pub mod objectgraph;
+pub mod objectstore;
+pub mod postgres;
 pub mod sqlite;
 pub mod types;
 mod util;
+pub mod version;
 
-pub use content::{ContentStore, LocalCasStore};
+pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};
+pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore};
 pub use engine::Fs;
 pub use error::{AfsError, Result};
 pub use metadata::MetadataStore;
+pub use objectgraph::{
+    Commit, CommitInfo, DiffEntry, DiffStatus, Tree, TreeEntry, TreeKind, VersioningMode,
+};
+pub use objectstore::{ObjectContentStore, S3Config};
+pub use postgres::PostgresMetadataStore;
 pub use sqlite::SqliteMetadataStore;
 pub use types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};

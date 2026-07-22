@@ -1,12 +1,13 @@
 //! afs-sdk — an ergonomic front door to an afs workspace.
 //!
-//! A workspace pairs a SQLite metadata store with a pluggable content backend
-//! (`Arc<dyn ContentStore>`): a local directory, an S3-compatible object store, an
-//! in-memory store, or a cached tier over any of them. Later milestones add
-//! commits and attribution behind the same façade.
+//! A workspace pairs a metadata store (SQLite or Postgres) with a pluggable
+//! content backend (local dir, S3-compatible object store, in-memory, or a cached
+//! tier). Both sides are `Arc<dyn …>`, so the backend is chosen at runtime. Later
+//! milestones add commits and attribution behind the same façade.
 
 use afs_core::{
-    ContentStore, Fs, LocalCasStore, ObjectContentStore, Result, S3Config, SqliteMetadataStore,
+    ContentStore, Fs, LocalCasStore, MetadataStore, ObjectContentStore, PostgresMetadataStore,
+    Result, S3Config, SqliteMetadataStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -14,37 +15,45 @@ use std::sync::Arc;
 pub use afs_core::{AfsError, DirEntry, FileKind, Inode, MemStore, TieredStore};
 pub use bytes::Bytes;
 
+type Meta = Arc<dyn MetadataStore>;
 type Content = Arc<dyn ContentStore>;
 
-/// A workspace: SQLite metadata over a pluggable content store.
+/// A workspace: a metadata store over a content store.
 pub struct Workspace {
-    fs: Fs<SqliteMetadataStore, Content>,
+    fs: Fs<Meta, Content>,
 }
 
 impl Workspace {
-    /// Open (creating if needed) a workspace with metadata at `db_path` and the
-    /// given content backend.
-    pub async fn open(db_path: impl AsRef<Path>, content: Content) -> Result<Self> {
-        let meta = SqliteMetadataStore::open(db_path)?;
+    /// Open (creating if needed) a workspace from explicit metadata + content
+    /// backends.
+    pub async fn open(meta: Meta, content: Content) -> Result<Self> {
         let fs = Fs::new(meta, content);
         fs.init().await?;
         Ok(Self { fs })
     }
 
-    /// Open a workspace with content-addressed blobs under a local directory.
+    /// SQLite metadata + content-addressed blobs under a local directory.
     pub async fn open_local(db_path: impl AsRef<Path>, cas_dir: impl AsRef<Path>) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
         let content: Content = Arc::new(LocalCasStore::open(cas_dir).await?);
-        Self::open(db_path, content).await
+        Self::open(meta, content).await
     }
 
-    /// Open a workspace backed by an S3-compatible object store.
+    /// SQLite metadata + an S3-compatible object store for content.
     pub async fn open_s3(db_path: impl AsRef<Path>, cfg: S3Config) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
         let content: Content = Arc::new(ObjectContentStore::s3(cfg)?);
-        Self::open(db_path, content).await
+        Self::open(meta, content).await
+    }
+
+    /// Postgres metadata (multi-writer) over the given content backend.
+    pub async fn open_pg(dsn: &str, content: Content) -> Result<Self> {
+        let meta: Meta = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        Self::open(meta, content).await
     }
 
     /// Access the underlying engine for operations not surfaced here.
-    pub fn fs(&self) -> &Fs<SqliteMetadataStore, Content> {
+    pub fn fs(&self) -> &Fs<Meta, Content> {
         &self.fs
     }
 

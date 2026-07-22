@@ -51,4 +51,10 @@ impl From<object_store::Error> for AfsError {
     }
 }
 
+impl From<tokio_postgres::Error> for AfsError {
+    fn from(e: tokio_postgres::Error) -> Self {
+        AfsError::Metadata(e.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, AfsError>;

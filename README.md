@@ -20,7 +20,7 @@ store, the working-tree engine, an SDK, and a CLI.
 |---|---|---|
 | **M0** | Core traits + SQLite metadata + local CAS + engine + SDK + CLI | ✅ done |
 | **M1** | Content addressing (BLAKE3 + FastCDC), large files, S3 backend, cache tier | ✅ done |
-| M2 | Postgres metadata backend (multi-writer) | ⬜ |
+| **M2** | Postgres metadata backend (multi-writer), dual-dialect migrations | ✅ done |
 | M3–M5 | Opt-in versioning, three-way merge, real-`git` interop | ⬜ |
 | M6 | Per-actor attribution + blame | ⬜ |
 | M7–M9 | Access surfaces, live collaboration, hardening | ⬜ |

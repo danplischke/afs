@@ -8,6 +8,7 @@
 
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
+use crate::migrations::MIGRATIONS;
 use crate::types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};
 use crate::util::now_secs;
 use async_trait::async_trait;
@@ -16,30 +17,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 const DIR_MODE: i64 = 0o040755;
-
-const SCHEMA_SQL: &str = "
-CREATE TABLE IF NOT EXISTS inode(
-    ino          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind         TEXT    NOT NULL,
-    mode         INTEGER NOT NULL,
-    nlink        INTEGER NOT NULL DEFAULT 1,
-    size         INTEGER NOT NULL DEFAULT 0,
-    content_hash TEXT,
-    mtime        INTEGER NOT NULL,
-    ctime        INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS dentry(
-    parent_ino INTEGER NOT NULL,
-    name       TEXT    NOT NULL,
-    ino        INTEGER NOT NULL,
-    PRIMARY KEY(parent_ino, name)
-);
-CREATE INDEX IF NOT EXISTS idx_dentry_ino ON dentry(ino);
-CREATE TABLE IF NOT EXISTS symlink(
-    ino    INTEGER PRIMARY KEY,
-    target TEXT NOT NULL
-);
-";
 
 /// A metadata store backed by a single SQLite database.
 pub struct SqliteMetadataStore {
@@ -101,8 +78,27 @@ fn build_inode(row: (i64, String, i64, i64, i64, Option<String>, i64, i64)) -> R
 impl MetadataStore for SqliteMetadataStore {
     async fn init(&self) -> Result<()> {
         let conn = self.lock();
-        conn.execute_batch(SCHEMA_SQL)?;
         let now = now_secs();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_meta(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+        )?;
+        for m in MIGRATIONS {
+            let applied = conn
+                .query_row(
+                    "SELECT 1 FROM schema_meta WHERE version = ?1",
+                    params![m.version],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !applied {
+                conn.execute_batch(m.sqlite)?;
+                conn.execute(
+                    "INSERT INTO schema_meta(version, applied_at) VALUES (?1, ?2)",
+                    params![m.version, now],
+                )?;
+            }
+        }
         conn.execute(
             "INSERT OR IGNORE INTO inode(ino, kind, mode, nlink, size, content_hash, mtime, ctime)
              VALUES (?1, 'dir', ?2, 1, 0, NULL, ?3, ?3)",

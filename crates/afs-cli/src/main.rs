@@ -9,7 +9,7 @@
 //! afs --workspace ./ws read /notes/a.txt
 //! ```
 
-use afs_sdk::Workspace;
+use afs_sdk::{MergeOutcome, Workspace};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
@@ -71,6 +71,30 @@ enum Cmd {
     Branch { name: Option<String> },
     /// Switch the working tree to a branch.
     Checkout { branch: String },
+    /// Merge a branch into the current branch.
+    Merge {
+        branch: String,
+        #[arg(long, default_value = "afs")]
+        author: String,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// List unresolved merge conflicts.
+    Conflicts,
+    /// Acquire an exclusive lock on a path.
+    Lock {
+        path: String,
+        #[arg(long, default_value = "cli")]
+        owner: String,
+    },
+    /// Release a lock on a path.
+    Unlock {
+        path: String,
+        #[arg(long, default_value = "cli")]
+        owner: String,
+    },
+    /// List held locks.
+    Locks,
 }
 
 #[tokio::main]
@@ -180,6 +204,53 @@ async fn main() -> Result<()> {
         Cmd::Checkout { branch } => {
             ws.checkout(&branch).await?;
             println!("switched to branch {branch}");
+        }
+        Cmd::Merge {
+            branch,
+            author,
+            message,
+        } => {
+            let msg = message.unwrap_or_else(|| format!("merge {branch}"));
+            match ws.merge_branch(&branch, &author, &msg).await? {
+                MergeOutcome::AlreadyUpToDate => println!("already up to date"),
+                MergeOutcome::FastForward(h) => {
+                    println!("fast-forward to {}", &h.to_hex()[..12])
+                }
+                MergeOutcome::Merged(h) => println!("merged as {}", &h.to_hex()[..12]),
+                MergeOutcome::Conflicts(cs) => {
+                    println!(
+                        "merge stopped with {} conflict(s); resolve then commit:",
+                        cs.len()
+                    );
+                    for c in cs {
+                        println!("  {} {}", c.kind, c.path);
+                    }
+                }
+            }
+        }
+        Cmd::Conflicts => {
+            for (path, kind) in ws.conflicts().await? {
+                println!("{kind}\t{path}");
+            }
+        }
+        Cmd::Lock { path, owner } => {
+            if ws.lock(&path, &owner).await? {
+                println!("locked {path}");
+            } else {
+                println!("already locked: {path}");
+            }
+        }
+        Cmd::Unlock { path, owner } => {
+            if ws.unlock(&path, &owner).await? {
+                println!("unlocked {path}");
+            } else {
+                println!("not your lock: {path}");
+            }
+        }
+        Cmd::Locks => {
+            for (path, owner, _at) in ws.locks().await? {
+                println!("{owner}\t{path}");
+            }
         }
     }
     Ok(())

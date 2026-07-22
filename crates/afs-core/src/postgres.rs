@@ -372,4 +372,66 @@ impl MetadataStore for PostgresMetadataStore {
         .await?;
         Ok(())
     }
+
+    async fn set_conflict(&self, path: &str, kind: &str) -> Result<()> {
+        let c = self.client().await?;
+        c.execute(
+            "INSERT INTO conflict(path, kind) VALUES ($1, $2)
+             ON CONFLICT (path) DO UPDATE SET kind = EXCLUDED.kind",
+            &[&path, &kind],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn list_conflicts(&self) -> Result<Vec<(String, String)>> {
+        let c = self.client().await?;
+        let rows = c
+            .query("SELECT path, kind FROM conflict ORDER BY path", &[])
+            .await?;
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    async fn clear_conflicts(&self) -> Result<()> {
+        let c = self.client().await?;
+        c.execute("DELETE FROM conflict", &[]).await?;
+        Ok(())
+    }
+
+    async fn acquire_lock(&self, path: &str, owner: &str, at: i64) -> Result<bool> {
+        let c = self.client().await?;
+        let changed = c
+            .execute(
+                "INSERT INTO file_lock(path, owner, acquired_at) VALUES ($1, $2, $3)
+                 ON CONFLICT (path) DO NOTHING",
+                &[&path, &owner, &at],
+            )
+            .await?;
+        Ok(changed == 1)
+    }
+
+    async fn release_lock(&self, path: &str, owner: &str) -> Result<bool> {
+        let c = self.client().await?;
+        let changed = c
+            .execute(
+                "DELETE FROM file_lock WHERE path = $1 AND owner = $2",
+                &[&path, &owner],
+            )
+            .await?;
+        Ok(changed == 1)
+    }
+
+    async fn list_locks(&self) -> Result<Vec<(String, String, i64)>> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT path, owner, acquired_at FROM file_lock ORDER BY path",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect())
+    }
 }

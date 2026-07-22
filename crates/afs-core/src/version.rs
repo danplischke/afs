@@ -53,7 +53,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         self.meta.set_config("versioning", mode.as_str()).await
     }
 
-    async fn ensure_commits_enabled(&self) -> Result<()> {
+    pub(crate) async fn ensure_commits_enabled(&self) -> Result<()> {
         if !self.versioning_mode().await?.commits_enabled() {
             return Err(AfsError::InvalidArgument(
                 "versioning is disabled (off mode)".to_string(),
@@ -94,10 +94,23 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         })?;
         let parent = self.head_commit().await?;
 
+        // A merge in progress contributes the incoming commit as a second parent.
+        let merge_head = self
+            .meta
+            .get_ref("MERGE_HEAD")
+            .await?
+            .and_then(|s| Hash::from_hex(&s));
+        let mut parents: Vec<Hash> = parent.iter().copied().collect();
+        if let Some(mh) = merge_head
+            && !parents.contains(&mh)
+        {
+            parents.push(mh);
+        }
+
         let tree = self.build_tree(INO_ROOT).await?;
         let commit = Commit {
             tree,
-            parents: parent.iter().copied().collect(),
+            parents,
             author: author.to_string(),
             message: message.to_string(),
             timestamp: now_secs(),
@@ -113,6 +126,11 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             return Err(AfsError::Metadata(
                 "branch moved concurrently; retry the commit".to_string(),
             ));
+        }
+        // Merge resolved: clear the in-progress state.
+        if merge_head.is_some() {
+            self.meta.delete_ref("MERGE_HEAD").await?;
+            self.meta.clear_conflicts().await?;
         }
         Ok(commit_hash)
     }
@@ -201,7 +219,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     /// Materialize a tree's entries as children of `parent_ino`.
     #[async_recursion]
-    async fn materialize_into(&self, tree_hash: Hash, parent_ino: Ino) -> Result<()> {
+    pub(crate) async fn materialize_into(&self, tree_hash: Hash, parent_ino: Ino) -> Result<()> {
         let tree = Tree::decode(&self.content.get(&tree_hash).await?)?;
         for e in &tree.entries {
             match e.kind {

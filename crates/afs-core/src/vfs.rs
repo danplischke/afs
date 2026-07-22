@@ -17,6 +17,12 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const SYMLINK_MODE: u32 = 0o120777;
 
+/// Ceiling on a single file's size. Whole-file operations (write/truncate)
+/// materialize the body in memory, so an unbounded client-supplied size/offset
+/// would otherwise abort the process on the allocation. Values above this are
+/// rejected with [`AfsError::TooLarge`] (mapped to `EFBIG`/`NFS3ERR_FBIG`).
+pub const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
+
 impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Look up `name` in directory `parent`, returning its inode.
     pub async fn vfs_lookup(&self, parent: Ino, name: &str) -> Result<Option<Inode>> {
@@ -76,7 +82,15 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             Some(h) => self.read_body(&h).await?,
             None => Vec::new(),
         };
-        let end = offset as usize + data.len();
+        // Checked: a hostile offset near u64::MAX would otherwise overflow and
+        // trigger a giant resize / slice-index panic.
+        let end = offset
+            .checked_add(data.len() as u64)
+            .filter(|&e| e <= MAX_FILE_SIZE)
+            .ok_or_else(|| {
+                AfsError::TooLarge(format!("write past {MAX_FILE_SIZE} bytes (ino {ino})"))
+            })?;
+        let end = end as usize;
         if bytes.len() < end {
             bytes.resize(end, 0);
         }
@@ -89,6 +103,11 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Truncate/extend a file to `size` bytes.
     pub async fn vfs_truncate(&self, ino: Ino, size: u64) -> Result<()> {
         let inode = self.vfs_getattr(ino).await?;
+        if size > MAX_FILE_SIZE {
+            return Err(AfsError::TooLarge(format!(
+                "truncate to {size} bytes exceeds {MAX_FILE_SIZE} (ino {ino})"
+            )));
+        }
         let mut bytes = match inode.content {
             Some(h) => self.read_body(&h).await?,
             None => Vec::new(),

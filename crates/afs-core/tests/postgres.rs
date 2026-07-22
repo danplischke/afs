@@ -239,3 +239,43 @@ async fn postgres_change_feed_push() {
     assert!(batch.iter().any(|e| e.path == "/e"));
     assert!(batch.iter().all(|e| e.path != "/d"), "main change filtered out");
 }
+
+/// A from-zero / lagging subscriber pages the backlog in bounded batches
+/// instead of loading every event into memory at once (drain has a LIMIT).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_drain_is_bounded() {
+    let Some(dsn) = dsn() else {
+        eprintln!("skipping postgres_drain_is_bounded: AFS_PG_TEST_URL unset");
+        return;
+    };
+    let _guard = pg_lock().lock().await;
+    reset(&dsn).await;
+    let meta = PostgresMetadataStore::connect(&dsn).await.unwrap();
+    meta.init().await.unwrap();
+
+    // Append more than one drain batch (the internal LIMIT is 1024).
+    for i in 0..1100i64 {
+        meta.append_event(
+            EventInit {
+                actor_id: None,
+                session_id: None,
+                kind: "write".into(),
+                path: format!("/f{i}"),
+                detail: None,
+                branch: None,
+            },
+            100 + i,
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut sub = meta.subscribe(0, None).await.unwrap();
+    let first = recv_batch(&mut sub).await;
+    assert_eq!(first.len(), 1024, "first drain is capped at the batch limit");
+    let second = recv_batch(&mut sub).await;
+    assert_eq!(second.len(), 76, "the remainder pages on the next drain");
+    // ordered + contiguous across pages
+    assert_eq!(first[0].seq + 1, first[1].seq);
+    assert_eq!(first.last().unwrap().seq + 1, second[0].seq);
+}

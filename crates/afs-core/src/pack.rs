@@ -242,8 +242,16 @@ fn parse_trailer(pack: &[u8]) -> Result<Vec<(Hash, u32, u32)>> {
         h.copy_from_slice(&trailer[i..i + 32]);
         let len = u32::from_le_bytes(trailer[i + 32..i + 36].try_into().unwrap());
         out.push((Hash::from_array(h), offset, len));
-        offset += len;
+        // Checked: a tampered trailer with huge lengths would otherwise overflow
+        // (panic in debug / wrap in release).
+        offset = offset.checked_add(len).ok_or_else(bad)?;
         i += 36;
+    }
+    // The chunk bodies must exactly fill the region before the trailer. If they
+    // don't, the (offset, len) pairs are inconsistent with the pack — reject it
+    // rather than letting `repack` slice out of range and panic.
+    if offset as usize != trailer_start {
+        return Err(bad());
     }
     Ok(out)
 }

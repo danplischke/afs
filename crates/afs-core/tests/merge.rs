@@ -138,8 +138,13 @@ async fn overlapping_text_conflicts_then_resolves() {
     assert!(fs.conflicts().await.unwrap().is_empty());
 }
 
+// Binary files are NOT line-merged over their chunk-hash sequence: doing so
+// silently corrupts binaries with repeated chunks (diff3 mis-anchors on equal
+// hash-lines and drops/duplicates a chunk). So any divergent binary 3-way is a
+// conflict that keeps ours + surfaces theirs as a `.theirs` sibling — even when
+// the two edits touch disjoint regions. Safety over convenience.
 #[tokio::test]
-async fn binary_disjoint_chunks_merge() {
+async fn binary_divergent_edits_conflict_never_corrupt() {
     let fs = fixture().await;
     let base = binary(300_000, 1);
     fs.write("/bin", &base).await.unwrap();
@@ -153,22 +158,50 @@ async fn binary_disjoint_chunks_merge() {
     fs.write("/bin", &theirs).await.unwrap();
     let dev = fs.commit("a", "end").await.unwrap();
 
-    // ours edits the START
+    // ours edits the START (disjoint region)
     fs.checkout("main").await.unwrap();
     let mut ours = base.clone();
     flip(&mut ours, 0..32);
     fs.write("/bin", &ours).await.unwrap();
     fs.commit("a", "start").await.unwrap();
 
-    assert!(matches!(
-        fs.merge(dev, "a", "merge").await.unwrap(),
-        MergeOutcome::Merged(_)
-    ));
-    // both disjoint edits are present
-    let mut expected = base.clone();
-    flip(&mut expected, 0..32);
-    flip(&mut expected, 299_968..300_000);
-    assert_eq!(fs.read("/bin").await.unwrap()[..], expected[..]);
+    match fs.merge(dev, "a", "merge").await.unwrap() {
+        MergeOutcome::Conflicts(cs) => assert!(cs.iter().any(|c| c.path == "/bin")),
+        other => panic!("expected binary conflict, got {other:?}"),
+    }
+    // ours is kept verbatim, theirs is preserved as a sibling — never a spliced,
+    // silently-corrupt body.
+    assert_eq!(fs.read("/bin").await.unwrap()[..], ours[..]);
+    assert_eq!(fs.read("/bin.theirs").await.unwrap()[..], theirs[..]);
+}
+
+// The trivially-clean binary case still auto-resolves: if only one side changed
+// the binary (the other equals base), take the changed side with no conflict.
+#[tokio::test]
+async fn binary_one_sided_edit_auto_resolves() {
+    let fs = fixture().await;
+    let base = binary(120_000, 7);
+    fs.write("/bin", &base).await.unwrap();
+    fs.write("/other.txt", b"base\n").await.unwrap();
+    fs.commit("a", "base").await.unwrap();
+    fs.create_branch("dev").await.unwrap();
+
+    // dev changes /bin; main modifies /other.txt (in the base), so this is a
+    // genuine 3-way merge (not a fast-forward). /bin must resolve to theirs
+    // (base == ours) with no conflict.
+    fs.checkout("dev").await.unwrap();
+    let mut theirs = base.clone();
+    flip(&mut theirs, 60_000..60_064);
+    fs.write("/bin", &theirs).await.unwrap();
+    let dev = fs.commit("a", "theirs").await.unwrap();
+
+    fs.checkout("main").await.unwrap();
+    fs.write("/other.txt", b"main change\n").await.unwrap();
+    fs.commit("a", "ours").await.unwrap();
+
+    let outcome = fs.merge(dev, "a", "merge").await.unwrap();
+    assert!(matches!(outcome, MergeOutcome::Merged(_)), "got {outcome:?}");
+    assert_eq!(fs.read("/bin").await.unwrap()[..], theirs[..]);
 }
 
 #[tokio::test]

@@ -77,6 +77,16 @@ impl Manifest {
             });
             off += ENTRY_LEN;
         }
+        // Cross-check the declared size against the chunks. A manifest always has
+        // `size == Σ chunk.len` (chunks cover the whole body), so a mismatch means
+        // corruption or tampering — and rejecting it here stops a hostile `size`
+        // (e.g. u64::MAX) from driving an OOM pre-allocation in `content_bytes`.
+        let total: u64 = chunks.iter().map(|c| c.len as u64).sum();
+        if total != size {
+            return Err(AfsError::Corrupt(format!(
+                "manifest size {size} != sum of chunk lengths {total}"
+            )));
+        }
         Ok(Manifest { size, chunks })
     }
 }

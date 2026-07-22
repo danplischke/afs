@@ -100,7 +100,20 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
     ) -> Result<i64> {
         let base_hash = self.current_content_hex(path).await?;
         let (mhash, _size) = self.store_body(data).await?;
-        let proposed_hash = mhash.map(|h| h.to_hex());
+        let proposed_hash = match mhash {
+            Some(h) => Some(h.to_hex()),
+            // Empty proposed content is a real *empty file*, not a deletion.
+            // `store_body("")` returns no manifest, so persist an explicit empty
+            // manifest and reference it — otherwise `proposed_hash == None` would
+            // be indistinguishable from `suggest_delete` and remove the file on
+            // accept.
+            None => Some(
+                self.content
+                    .put(&crate::chunk::Manifest::default().encode())
+                    .await?
+                    .to_hex(),
+            ),
+        };
         self.record_suggestion(ctx, path, base_hash, proposed_hash, summary)
             .await
     }
@@ -112,10 +125,11 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
         path: &str,
         summary: Option<&str>,
     ) -> Result<i64> {
+        // Existence is a namespace question, not "has content": an empty file
+        // exists but has no content hash. `resolve` errors `NotFound` if the
+        // path genuinely doesn't exist.
+        self.resolve(path).await?;
         let base_hash = self.current_content_hex(path).await?;
-        if base_hash.is_none() {
-            return Err(AfsError::NotFound(path.to_string()));
-        }
         self.record_suggestion(ctx, path, base_hash, None, summary)
             .await
     }

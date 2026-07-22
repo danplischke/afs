@@ -21,6 +21,7 @@ use crate::engine::Fs;
 use crate::error::Result;
 use crate::metadata::MetadataStore;
 use crate::objectgraph::TreeKind;
+use crate::suggest::SuggestionStatus;
 use crate::types::{FileKind, Hash, Ino, INO_ROOT};
 use async_recursion::async_recursion;
 use std::collections::HashSet;
@@ -51,6 +52,25 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
         // Roots 2: the live working tree (uncommitted bodies aren't in any commit).
         self.mark_working(INO_ROOT, &mut marked).await?;
+
+        // Roots 3: pending suggestions. A proposed body lives only in the CAS
+        // until the suggestion is accepted — referenced by no ref and no working
+        // file — so without this root a GC pass would reclaim it and a later
+        // `accept_suggestion`/`suggestion_diff` would fail with `ContentMissing`.
+        for s in self
+            .meta
+            .list_suggestions(Some(SuggestionStatus::Pending), None)
+            .await?
+        {
+            for hex in [s.base_hash.as_deref(), s.proposed_hash.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(h) = Hash::from_hex(hex) {
+                    self.mark_manifest(h, &mut marked).await?;
+                }
+            }
+        }
 
         // Sweep: delete everything not marked.
         let mut stats = GcStats {

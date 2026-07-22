@@ -29,6 +29,12 @@ pub enum AfsError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error("too large: {0}")]
+    TooLarge(String),
+
+    #[error("corrupt object: {0}")]
+    Corrupt(String),
+
     #[error("content missing for hash {0}")]
     ContentMissing(String),
 

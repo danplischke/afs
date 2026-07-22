@@ -24,6 +24,13 @@ use tokio_postgres::{AsyncMessage, NoTls, Row};
 
 const DIR_MODE: i64 = 0o040755;
 
+/// Advisory-lock key that serializes concurrent schema bootstraps (`init`).
+const MIGRATION_LOCK_KEY: i64 = 0x0af5_0000_dbdb;
+
+/// Max events a single subscription `drain` pulls at once, so a lagging or
+/// from-zero subscriber pages the backlog instead of loading it all into memory.
+const DRAIN_BATCH: i64 = 1024;
+
 /// A metadata store backed by a Postgres database (with a connection pool).
 pub struct PostgresMetadataStore {
     pool: Pool,
@@ -40,8 +47,14 @@ impl PostgresMetadataStore {
             .parse()
             .map_err(|e: tokio_postgres::Error| AfsError::Metadata(e.to_string()))?;
         let mgr = Manager::new(cfg, NoTls);
+        // Bound acquisition: without a wait timeout, exhausting the pool makes
+        // `client()` hang forever instead of surfacing a retriable error. A
+        // runtime must be set for the timeouts to be enforced.
         let pool = Pool::builder(mgr)
             .max_size(16)
+            .runtime(deadpool_postgres::Runtime::Tokio1)
+            .wait_timeout(Some(std::time::Duration::from_secs(10)))
+            .create_timeout(Some(std::time::Duration::from_secs(10)))
             .build()
             .map_err(|e| AfsError::Metadata(e.to_string()))?;
         Ok(Self {
@@ -168,8 +181,8 @@ impl EventSubscription {
                 self.client
                     .query(
                         "SELECT seq, actor_id, session_id, kind, path, detail, ts, branch
-                         FROM fs_event WHERE seq > $1 AND branch = $2 ORDER BY seq",
-                        &[&self.cursor, b],
+                         FROM fs_event WHERE seq > $1 AND branch = $2 ORDER BY seq LIMIT $3",
+                        &[&self.cursor, b, &DRAIN_BATCH],
                     )
                     .await
             }
@@ -177,8 +190,8 @@ impl EventSubscription {
                 self.client
                     .query(
                         "SELECT seq, actor_id, session_id, kind, path, detail, ts, branch
-                         FROM fs_event WHERE seq > $1 ORDER BY seq",
-                        &[&self.cursor],
+                         FROM fs_event WHERE seq > $1 ORDER BY seq LIMIT $2",
+                        &[&self.cursor, &DRAIN_BATCH],
                     )
                     .await
             }
@@ -248,23 +261,28 @@ fn row_to_inode(r: &Row) -> Result<Inode> {
 #[async_trait]
 impl MetadataStore for PostgresMetadataStore {
     async fn init(&self) -> Result<()> {
-        let c = self.client().await?;
+        let mut c = self.client().await?;
         let now = now_secs();
-        c.batch_execute(
+        // The whole bootstrap is ONE transaction: a crash can never leave a
+        // migration's DDL applied without its `schema_meta` row (which would
+        // brick the next `init` on a non-idempotent step). A transaction-scoped
+        // advisory lock serializes concurrent multi-writer bootstraps and is
+        // auto-released at commit/rollback, so it can't leak on the error path.
+        let tx = c.transaction().await?;
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK_KEY])
+            .await?;
+        tx.batch_execute(
             "CREATE TABLE IF NOT EXISTS schema_meta(version BIGINT PRIMARY KEY, applied_at BIGINT NOT NULL);",
         )
         .await?;
         for m in MIGRATIONS {
-            let applied = c
-                .query_opt(
-                    "SELECT 1 FROM schema_meta WHERE version = $1",
-                    &[&m.version],
-                )
+            let applied = tx
+                .query_opt("SELECT 1 FROM schema_meta WHERE version = $1", &[&m.version])
                 .await?
                 .is_some();
             if !applied {
-                c.batch_execute(m.postgres).await?;
-                c.execute(
+                tx.batch_execute(m.postgres).await?;
+                tx.execute(
                     "INSERT INTO schema_meta(version, applied_at) VALUES ($1, $2)",
                     &[&m.version, &now],
                 )
@@ -272,17 +290,18 @@ impl MetadataStore for PostgresMetadataStore {
             }
         }
         // Root directory (ino=1), then advance the identity sequence past it.
-        c.execute(
+        tx.execute(
             "INSERT INTO inode(ino, kind, mode, nlink, size, content_hash, mtime, ctime)
              VALUES (1, 'dir', $1, 1, 0, NULL, $2, $2) ON CONFLICT (ino) DO NOTHING",
             &[&DIR_MODE, &now],
         )
         .await?;
-        c.execute(
+        tx.execute(
             "SELECT setval(pg_get_serial_sequence('inode', 'ino'), (SELECT MAX(ino) FROM inode))",
             &[],
         )
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -810,6 +829,14 @@ impl MetadataStore for PostgresMetadataStore {
                 }
             })
             .collect())
+    }
+
+    async fn reap_presence(&self, older_than: i64) -> Result<u64> {
+        let c = self.client().await?;
+        let n = c
+            .execute("DELETE FROM presence WHERE last_seen < $1", &[&older_than])
+            .await?;
+        Ok(n)
     }
 
     async fn create_suggestion(&self, init: SuggestionInit, ts: i64) -> Result<i64> {

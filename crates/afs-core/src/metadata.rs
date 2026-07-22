@@ -136,6 +136,10 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<()>;
     /// Sessions with `last_seen >= since_ts`, most recently seen first.
     async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>>;
+    /// Delete presence rows with `last_seen < older_than` (keeps the table from
+    /// growing without bound — one row accretes per session otherwise). Returns
+    /// the number reaped.
+    async fn reap_presence(&self, older_than: i64) -> Result<u64>;
 
     // --- agent-suggestion review queue -----------------------------------
 
@@ -293,6 +297,9 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>> {
         (**self).active_presence(since_ts).await
+    }
+    async fn reap_presence(&self, older_than: i64) -> Result<u64> {
+        (**self).reap_presence(older_than).await
     }
     async fn create_suggestion(&self, init: SuggestionInit, ts: i64) -> Result<i64> {
         (**self).create_suggestion(init, ts).await

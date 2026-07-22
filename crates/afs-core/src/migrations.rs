@@ -50,8 +50,8 @@ pub const MIGRATIONS: &[Migration] = &[
     // `ADD COLUMN` in both dialects.
     Migration {
         version: 6,
-        sqlite: V6,
-        postgres: V6,
+        sqlite: V6_SQLITE,
+        postgres: V6_POSTGRES,
     },
     // V7 — agent-suggestion review queue: proposed edits held for human review.
     // Content lives in the CAS (base/proposed are content hashes); this table is
@@ -63,7 +63,11 @@ pub const MIGRATIONS: &[Migration] = &[
     },
 ];
 
-const V6: &str = "ALTER TABLE fs_event ADD COLUMN branch TEXT;";
+// SQLite has no `ADD COLUMN IF NOT EXISTS`; the migration runner tolerates a
+// re-applied ADD COLUMN (duplicate-column) so a re-run is idempotent. Postgres
+// expresses idempotency directly.
+const V6_SQLITE: &str = "ALTER TABLE fs_event ADD COLUMN branch TEXT;";
+const V6_POSTGRES: &str = "ALTER TABLE fs_event ADD COLUMN IF NOT EXISTS branch TEXT;";
 
 const V7_SQLITE: &str = "
 CREATE TABLE IF NOT EXISTS suggestion(

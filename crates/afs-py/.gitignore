@@ -1,0 +1,9 @@
+# Python / maturin build artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+dist/

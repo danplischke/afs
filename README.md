@@ -40,6 +40,7 @@ store, the working-tree engine, an SDK, and a CLI.
 | **Live feed** | Blocking Postgres `LISTEN/NOTIFY` push subscription; branch-scoped change feed | ✅ done |
 | **Diff** | Two-branch comparison by content address; per-file unified line diff (SDK/HTTP/CLI) | ✅ done |
 | **Suggestions** | Agent edits proposed for human review — accept (attributed) / reject, stale-base guard | ✅ done |
+| **Python** | Async-native PyO3 bindings: FastAPI-ready workspace ops, attribution, suggestions, mount/NFS | ✅ done |
 | Optional | Packed-object git import | ⬜ |
 
 ## Layout
@@ -53,6 +54,7 @@ crates/
   afs-fuse/     # mount the workspace as a POSIX filesystem via FUSE
   afs-mcp/      # serve the workspace to agents over the Model Context Protocol
   afs-nfs/      # serve the workspace over NFSv3 (mountable by any NFS client)
+  afs-py/       # async-native Python bindings (PyO3) — FastAPI, attribution, mounting
   afs-git/      # export/import genuine git objects — drive afs with the real `git`
   afs-remote-git/ # `git-remote-afs` helper: clone/fetch/push over afs:// URLs
   afs-agentfs/  # import a tursodatabase/agentfs SQLite database into a workspace
@@ -207,6 +209,24 @@ accept_suggestion / reject_suggestion`. Over HTTP: `POST /suggestions`,
 `GET /suggestions`, `GET /suggestions/{id}/diff`, `POST /suggestions/{id}/accept`.
 It reuses the CAS, the diff engine, the change feed (a `suggest` event), and
 attribution — no new subsystems.
+
+### Python (FastAPI)
+
+Async-native bindings (`afs-py`, built with PyO3) let you drive a workspace from
+Python and write your own endpoints — resolving identity yourself and injecting
+the user/agent behind each write. Every I/O method is awaitable, so it composes
+with FastAPI's `async def`; structured results are plain dicts (JSON-ready):
+
+```python
+import afs
+ws = await afs.Workspace.open_local("meta.db", "cas")   # or open_pg(dsn, cas)
+ctx = afs.WriteCtx.session(actor_id, session_id)         # your resolved identity
+await ws.write_as(ctx, "/notes.txt", b"hello")           # attributed -> blame + audit
+sid = await ws.suggest(ctx, "/x", b"proposed")           # agent proposes for review
+mount = ws.mount("/mnt/afs")                             # orchestrate FUSE from Python
+```
+
+Build with `maturin develop`; see `crates/afs-py/` (`examples/fastapi_app.py`).
 
 ### HTTP API
 

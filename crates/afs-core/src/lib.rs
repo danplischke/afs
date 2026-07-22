@@ -13,6 +13,7 @@ pub mod chunk;
 pub mod content;
 pub mod engine;
 pub mod error;
+pub mod interop;
 pub mod merge;
 pub mod metadata;
 pub mod migrations;

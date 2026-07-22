@@ -136,6 +136,36 @@ enum Cmd {
         #[arg(long, default_value = "unknown")]
         model: String,
     },
+    /// Interoperate with the real `git` (export/import genuine git objects).
+    Git {
+        #[command(subcommand)]
+        cmd: GitCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitCmd {
+    /// Export a branch as a real git repository the `git` CLI can read.
+    Export {
+        /// Directory to write the git repository into.
+        dir: PathBuf,
+        /// Branch to export (defaults to the current branch).
+        #[arg(long)]
+        branch: Option<String>,
+        /// Object id format: `sha1` (GitHub-compatible) or `sha256`.
+        #[arg(long, default_value = "sha1")]
+        format: String,
+        /// Write files at least this many bytes as git-LFS pointers.
+        #[arg(long)]
+        lfs_threshold: Option<u64>,
+    },
+    /// Import a real git repository's history into the workspace.
+    Import {
+        /// Directory of the git repository to import.
+        dir: PathBuf,
+        #[arg(long, default_value = "main")]
+        branch: String,
+    },
 }
 
 #[tokio::main]
@@ -379,6 +409,39 @@ async fn main() -> Result<()> {
             let server = afs_mcp::McpServer::create(ws, &agent_name, &model).await?;
             server.serve_stdio().await?;
         }
+        Cmd::Git { cmd } => match cmd {
+            GitCmd::Export {
+                dir,
+                branch,
+                format,
+                lfs_threshold,
+            } => {
+                let format = afs_git::ObjectFormat::parse(&format)
+                    .ok_or_else(|| anyhow::anyhow!("format must be `sha1` or `sha256`"))?;
+                let opts = afs_git::ExportOptions {
+                    format,
+                    branch,
+                    lfs_threshold,
+                };
+                let out = afs_git::export_git(&ws, &dir, &opts).await?;
+                println!(
+                    "exported branch {} ({} commit(s), {} lfs object(s)) to {}",
+                    out.branch,
+                    out.commits,
+                    out.lfs_objects,
+                    dir.display()
+                );
+                println!("head {} {}", format.as_str(), out.head);
+            }
+            GitCmd::Import { dir, branch } => {
+                let head = afs_git::import_git(&ws, &dir, &branch).await?;
+                println!(
+                    "imported branch {branch} at {} from {}",
+                    &head.to_hex()[..12],
+                    dir.display()
+                );
+            }
+        },
     }
     Ok(())
 }

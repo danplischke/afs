@@ -23,12 +23,12 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M2** | Postgres metadata backend (multi-writer), dual-dialect migrations | ✅ done |
 | **M3** | Opt-in versioning: commit DAG, branches, checkout, log, status | ✅ done |
 | **M4** | Three-way merge (diff3 text, chunk-granular binary), conflicts, locks | ✅ done |
-| M5 | Real-`git` interop (SHA-256 objects, remote helper, LFS) | ⬜ |
+| **M5** | Real-`git` interop: export/import genuine git objects (SHA-1 + SHA-256), git-LFS pointer bridge | ✅ done |
 | **M6** | Per-actor attribution + blame (human vs agent), edit-op audit, revert | ✅ done |
 | **Sandbox** | Isolated overlayfs CoW runs, imported back as attributed changes | ✅ done |
 | **FUSE** | Mount the workspace as a POSIX filesystem (real read/write mount) | ✅ done |
 | **MCP** | Serve the workspace to agents over MCP (JSON-RPC/stdio); writes attributed | ✅ done |
-| M5, M7–M9 | git interop, more surfaces (NFS/API), live collaboration, hardening | ⬜ |
+| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, hardening | ⬜ |
 
 ## Layout
 
@@ -40,6 +40,7 @@ crates/
   afs-sandbox/  # overlayfs copy-on-write sandbox runs, imported as attributed changes
   afs-fuse/     # mount the workspace as a POSIX filesystem via FUSE
   afs-mcp/      # serve the workspace to agents over the Model Context Protocol
+  afs-git/      # export/import genuine git objects — drive afs with the real `git`
 docs/DESIGN.md
 ```
 
@@ -65,6 +66,26 @@ ws.mkdir_p("/notes").await?;
 ws.write("/notes/a.txt", b"hello").await?;
 let bytes = ws.read("/notes/a.txt").await?;
 ```
+
+### Git interop (opt-in)
+
+afs stays BLAKE3-native internally, but its commit history can be projected to —
+and imported from — genuine git objects, so you can keep using the real `git`
+CLI and hosts like GitHub:
+
+```bash
+# afs history -> a real git repo the `git` binary reads directly
+afs --workspace "$WS" commit -m "initial" --author "Dan <dan@example.com>"
+afs --workspace "$WS" git export ./repo --format sha256   # or sha1 for GitHub
+git -C ./repo log --oneline        # real git, reading afs-produced objects
+git -C ./repo fsck --strict        # clean
+
+# a real git repo -> afs history
+afs --workspace "$WS2" git import ./repo --branch main
+```
+
+Large files can be exported as git-LFS pointer blobs (`--lfs-threshold <bytes>`),
+backed by afs's content-addressed chunk store.
 
 ## Development
 

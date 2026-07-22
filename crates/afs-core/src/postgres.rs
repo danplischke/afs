@@ -289,4 +289,87 @@ impl MetadataStore for PostgresMetadataStore {
             .await?;
         Ok(row.map(|r| r.get(0)))
     }
+
+    async fn get_ref(&self, name: &str) -> Result<Option<String>> {
+        let c = self.client().await?;
+        let row = c
+            .query_opt("SELECT value FROM ref WHERE name = $1", &[&name])
+            .await?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    async fn set_ref(&self, name: &str, value: &str) -> Result<()> {
+        let c = self.client().await?;
+        c.execute(
+            "INSERT INTO ref(name, value) VALUES ($1, $2)
+             ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+            &[&name, &value],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn cas_ref(&self, name: &str, expect: Option<&str>, new: &str) -> Result<bool> {
+        let c = self.client().await?;
+        let changed = match expect {
+            None => {
+                c.execute(
+                    "INSERT INTO ref(name, value) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+                    &[&name, &new],
+                )
+                .await?
+            }
+            Some(v) => {
+                c.execute(
+                    "UPDATE ref SET value = $1 WHERE name = $2 AND value = $3",
+                    &[&new, &name, &v],
+                )
+                .await?
+            }
+        };
+        Ok(changed == 1)
+    }
+
+    async fn delete_ref(&self, name: &str) -> Result<()> {
+        let c = self.client().await?;
+        c.execute("DELETE FROM ref WHERE name = $1", &[&name])
+            .await?;
+        Ok(())
+    }
+
+    async fn list_refs(&self) -> Result<Vec<(String, String)>> {
+        let c = self.client().await?;
+        let rows = c
+            .query("SELECT name, value FROM ref ORDER BY name", &[])
+            .await?;
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    async fn get_config(&self, key: &str) -> Result<Option<String>> {
+        let c = self.client().await?;
+        let row = c
+            .query_opt("SELECT value FROM config WHERE key = $1", &[&key])
+            .await?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        let c = self.client().await?;
+        c.execute(
+            "INSERT INTO config(key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            &[&key, &value],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn truncate_tree(&self) -> Result<()> {
+        let c = self.client().await?;
+        c.batch_execute(
+            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM inode WHERE ino <> 1;",
+        )
+        .await?;
+        Ok(())
+    }
 }

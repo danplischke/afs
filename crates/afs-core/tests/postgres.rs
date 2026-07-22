@@ -98,6 +98,20 @@ async fn postgres_backend() {
     assert_eq!(fs.ls("/a").await.unwrap().len(), 22);
     assert_eq!(&fs.read("/a/c07.txt").await.unwrap()[..], b"data-7");
 
+    // --- versioning over Postgres (same engine, PG-backed refs/config) ------
+    let commit = fs.commit("tester", "snapshot on pg").await.unwrap();
+    let log = fs.log().await.unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].hash, commit);
+    fs.create_branch("dev").await.unwrap();
+    assert!(
+        fs.list_branches()
+            .await
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == "dev")
+    );
+
     // --- advisory lock + NOTIFY helpers -------------------------------------
     let pg = PostgresMetadataStore::connect(&dsn).await.unwrap();
     pg.advisory_lock(4242).await.unwrap();

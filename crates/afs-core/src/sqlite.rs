@@ -261,4 +261,86 @@ impl MetadataStore for SqliteMetadataStore {
         .optional()
         .map_err(Into::into)
     }
+
+    async fn get_ref(&self, name: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT value FROM ref WHERE name = ?1",
+            params![name],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    async fn set_ref(&self, name: &str, value: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO ref(name, value) VALUES (?1, ?2)
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            params![name, value],
+        )?;
+        Ok(())
+    }
+
+    async fn cas_ref(&self, name: &str, expect: Option<&str>, new: &str) -> Result<bool> {
+        let conn = self.lock();
+        let changed = match expect {
+            None => conn.execute(
+                "INSERT INTO ref(name, value) VALUES (?1, ?2) ON CONFLICT(name) DO NOTHING",
+                params![name, new],
+            )?,
+            Some(v) => conn.execute(
+                "UPDATE ref SET value = ?1 WHERE name = ?2 AND value = ?3",
+                params![new, name, v],
+            )?,
+        };
+        Ok(changed == 1)
+    }
+
+    async fn delete_ref(&self, name: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM ref WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
+    async fn list_refs(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT name, value FROM ref ORDER BY name")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn get_config(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT value FROM config WHERE key = ?1",
+            params![key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO config(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    async fn truncate_tree(&self) -> Result<()> {
+        let conn = self.lock();
+        conn.execute_batch(
+            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM inode WHERE ino <> 1;",
+        )?;
+        Ok(())
+    }
 }

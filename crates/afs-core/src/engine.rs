@@ -27,9 +27,12 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         Self { meta, content }
     }
 
-    /// Initialize the metadata schema and the root directory.
+    /// Initialize the metadata schema, the root directory, and versioning state
+    /// (HEAD → `main`, default `versioning = native`).
     pub async fn init(&self) -> Result<()> {
-        self.meta.init().await
+        self.meta.init().await?;
+        self.init_versioning().await?;
+        Ok(())
     }
 
     // --- path helpers -----------------------------------------------------

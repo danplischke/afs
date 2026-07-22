@@ -12,7 +12,10 @@ use afs_core::{
 use std::path::Path;
 use std::sync::Arc;
 
-pub use afs_core::{AfsError, DirEntry, FileKind, Inode, MemStore, TieredStore};
+pub use afs_core::{
+    AfsError, CommitInfo, DiffEntry, DiffStatus, DirEntry, FileKind, Hash, Inode, MemStore,
+    TieredStore, VersioningMode,
+};
 pub use bytes::Bytes;
 
 type Meta = Arc<dyn MetadataStore>;
@@ -96,5 +99,50 @@ impl Workspace {
 
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
         self.fs.rename(from, to).await
+    }
+
+    // --- versioning ------------------------------------------------------
+
+    /// Snapshot the working tree into a commit on the current branch.
+    pub async fn commit(&self, author: &str, message: &str) -> Result<Hash> {
+        self.fs.commit(author, message).await
+    }
+
+    /// Commit history from HEAD (first-parent).
+    pub async fn log(&self) -> Result<Vec<CommitInfo>> {
+        self.fs.log().await
+    }
+
+    /// Working-tree changes relative to HEAD.
+    pub async fn status(&self) -> Result<Vec<DiffEntry>> {
+        self.fs.status().await
+    }
+
+    /// The current branch name (or `None` if detached).
+    pub async fn current_branch(&self) -> Result<Option<String>> {
+        self.fs.current_branch().await
+    }
+
+    /// Create a branch at the current HEAD commit.
+    pub async fn create_branch(&self, name: &str) -> Result<()> {
+        self.fs.create_branch(name).await
+    }
+
+    /// Switch the working tree to `branch`.
+    pub async fn checkout(&self, branch: &str) -> Result<()> {
+        self.fs.checkout(branch).await
+    }
+
+    /// All branches with their commit hashes.
+    pub async fn list_branches(&self) -> Result<Vec<(String, Hash)>> {
+        self.fs.list_branches().await
+    }
+
+    pub async fn versioning_mode(&self) -> Result<VersioningMode> {
+        self.fs.versioning_mode().await
+    }
+
+    pub async fn set_versioning_mode(&self, mode: VersioningMode) -> Result<()> {
+        self.fs.set_versioning_mode(mode).await
     }
 }

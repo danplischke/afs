@@ -56,6 +56,21 @@ enum Cmd {
     Rm { path: String },
     /// Move/rename a path.
     Mv { from: String, to: String },
+    /// Snapshot the working tree into a commit.
+    Commit {
+        #[arg(short, long)]
+        message: String,
+        #[arg(long, default_value = "afs")]
+        author: String,
+    },
+    /// Show commit history (HEAD, first-parent).
+    Log,
+    /// Show working-tree changes relative to HEAD.
+    Status,
+    /// Create a branch at HEAD, or list branches when no name is given.
+    Branch { name: Option<String> },
+    /// Switch the working tree to a branch.
+    Checkout { branch: String },
 }
 
 #[tokio::main]
@@ -120,6 +135,51 @@ async fn main() -> Result<()> {
         }
         Cmd::Mv { from, to } => {
             ws.rename(&from, &to).await?;
+        }
+        Cmd::Commit { message, author } => {
+            let hash = ws.commit(&author, &message).await?;
+            let branch = ws.current_branch().await?.unwrap_or_else(|| "?".into());
+            println!("[{branch} {}] {message}", &hash.to_hex()[..12]);
+        }
+        Cmd::Log => {
+            for ci in ws.log().await? {
+                println!(
+                    "{} {}  {}",
+                    &ci.hash.to_hex()[..12],
+                    ci.commit.author,
+                    ci.commit.message
+                );
+            }
+        }
+        Cmd::Status => {
+            let changes = ws.status().await?;
+            if changes.is_empty() {
+                println!("clean (working tree matches HEAD)");
+            }
+            for d in changes {
+                println!("{} {}", d.status.sigil(), d.path);
+            }
+        }
+        Cmd::Branch { name } => match name {
+            Some(name) => {
+                ws.create_branch(&name).await?;
+                println!("created branch {name}");
+            }
+            None => {
+                let current = ws.current_branch().await?;
+                for (name, hash) in ws.list_branches().await? {
+                    let marker = if current.as_deref() == Some(&name) {
+                        "* "
+                    } else {
+                        "  "
+                    };
+                    println!("{marker}{name}\t{}", &hash.to_hex()[..12]);
+                }
+            }
+        },
+        Cmd::Checkout { branch } => {
+            ws.checkout(&branch).await?;
+            println!("switched to branch {branch}");
         }
     }
     Ok(())

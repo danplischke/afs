@@ -12,11 +12,31 @@ pub struct Migration {
 }
 
 /// The ordered migration list. Append new steps; never edit an applied one.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sqlite: SQLITE_V1,
-    postgres: POSTGRES_V1,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sqlite: SQLITE_V1,
+        postgres: POSTGRES_V1,
+    },
+    // V2 — versioning: refs (branches/tags/HEAD) and workspace config. The SQL is
+    // identical across dialects (plain TEXT columns).
+    Migration {
+        version: 2,
+        sqlite: V2,
+        postgres: V2,
+    },
+];
+
+const V2: &str = "
+CREATE TABLE IF NOT EXISTS ref(
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS config(
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
 
 const SQLITE_V1: &str = "
 CREATE TABLE IF NOT EXISTS inode(

@@ -51,6 +51,35 @@ pub trait MetadataStore: Send + Sync {
 
     /// Fetch a symlink target, or `None` if `ino` is not a symlink.
     async fn get_symlink(&self, ino: Ino) -> Result<Option<String>>;
+
+    // --- refs (branches / tags / HEAD) -----------------------------------
+
+    /// Read a ref's value (a commit hex, or a symbolic `ref:<name>`).
+    async fn get_ref(&self, name: &str) -> Result<Option<String>>;
+
+    /// Set (upsert) a ref.
+    async fn set_ref(&self, name: &str, value: &str) -> Result<()>;
+
+    /// Compare-and-swap a ref: succeed only if its current value equals `expect`
+    /// (`None` meaning "must not exist"). Returns whether the swap happened.
+    async fn cas_ref(&self, name: &str, expect: Option<&str>, new: &str) -> Result<bool>;
+
+    /// Delete a ref (no-op if absent).
+    async fn delete_ref(&self, name: &str) -> Result<()>;
+
+    /// List all refs as `(name, value)` pairs.
+    async fn list_refs(&self) -> Result<Vec<(String, String)>>;
+
+    // --- workspace config ------------------------------------------------
+
+    async fn get_config(&self, key: &str) -> Result<Option<String>>;
+    async fn set_config(&self, key: &str, value: &str) -> Result<()>;
+
+    // --- working tree ----------------------------------------------------
+
+    /// Clear the entire working tree (all dentries, symlinks, and inodes except
+    /// the root) — used by `checkout` before materializing a commit.
+    async fn truncate_tree(&self) -> Result<()>;
 }
 
 /// Delegating impl so `Arc<dyn MetadataStore>` (and `Arc<ConcreteStore>`) is
@@ -95,5 +124,29 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn get_symlink(&self, ino: Ino) -> Result<Option<String>> {
         (**self).get_symlink(ino).await
+    }
+    async fn get_ref(&self, name: &str) -> Result<Option<String>> {
+        (**self).get_ref(name).await
+    }
+    async fn set_ref(&self, name: &str, value: &str) -> Result<()> {
+        (**self).set_ref(name, value).await
+    }
+    async fn cas_ref(&self, name: &str, expect: Option<&str>, new: &str) -> Result<bool> {
+        (**self).cas_ref(name, expect, new).await
+    }
+    async fn delete_ref(&self, name: &str) -> Result<()> {
+        (**self).delete_ref(name).await
+    }
+    async fn list_refs(&self) -> Result<Vec<(String, String)>> {
+        (**self).list_refs().await
+    }
+    async fn get_config(&self, key: &str) -> Result<Option<String>> {
+        (**self).get_config(key).await
+    }
+    async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        (**self).set_config(key, value).await
+    }
+    async fn truncate_tree(&self) -> Result<()> {
+        (**self).truncate_tree().await
     }
 }

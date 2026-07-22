@@ -205,7 +205,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     /// Chunk `data` (content-defined), store each chunk, and write a manifest.
     /// Returns `(manifest_hash, size)`; an empty body yields `(None, 0)`.
-    async fn store_body(&self, data: &[u8]) -> Result<(Option<Hash>, u64)> {
+    pub(crate) async fn store_body(&self, data: &[u8]) -> Result<(Option<Hash>, u64)> {
         if data.is_empty() {
             return Ok((None, 0));
         }
@@ -225,7 +225,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         Ok((Some(mhash), manifest.size))
     }
 
-    async fn load_manifest(&self, mhash: &Hash) -> Result<Manifest> {
+    pub(crate) async fn load_manifest(&self, mhash: &Hash) -> Result<Manifest> {
         let bytes = self.content.get(mhash).await?;
         Manifest::decode(&bytes)
     }

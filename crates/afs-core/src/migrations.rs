@@ -25,6 +25,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sqlite: V2,
         postgres: V2,
     },
+    // V3 — merge: recorded conflicts and git-LFS-style exclusive file locks.
+    Migration {
+        version: 3,
+        sqlite: V3,
+        postgres: V3,
+    },
 ];
 
 const V2: &str = "
@@ -35,6 +41,18 @@ CREATE TABLE IF NOT EXISTS ref(
 CREATE TABLE IF NOT EXISTS config(
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+";
+
+const V3: &str = "
+CREATE TABLE IF NOT EXISTS conflict(
+    path TEXT PRIMARY KEY,
+    kind TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS file_lock(
+    path        TEXT PRIMARY KEY,
+    owner       TEXT NOT NULL,
+    acquired_at BIGINT NOT NULL
 );
 ";
 

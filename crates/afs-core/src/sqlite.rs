@@ -343,4 +343,68 @@ impl MetadataStore for SqliteMetadataStore {
         )?;
         Ok(())
     }
+
+    async fn set_conflict(&self, path: &str, kind: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO conflict(path, kind) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET kind = excluded.kind",
+            params![path, kind],
+        )?;
+        Ok(())
+    }
+
+    async fn list_conflicts(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT path, kind FROM conflict ORDER BY path")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn clear_conflicts(&self) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM conflict", [])?;
+        Ok(())
+    }
+
+    async fn acquire_lock(&self, path: &str, owner: &str, at: i64) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "INSERT INTO file_lock(path, owner, acquired_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO NOTHING",
+            params![path, owner, at],
+        )?;
+        Ok(changed == 1)
+    }
+
+    async fn release_lock(&self, path: &str, owner: &str) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "DELETE FROM file_lock WHERE path = ?1 AND owner = ?2",
+            params![path, owner],
+        )?;
+        Ok(changed == 1)
+    }
+
+    async fn list_locks(&self) -> Result<Vec<(String, String, i64)>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT path, owner, acquired_at FROM file_lock ORDER BY path")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }

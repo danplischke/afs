@@ -13,8 +13,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use afs_core::{
-    AfsError, CommitInfo, DiffEntry, DiffStatus, DirEntry, FileKind, Hash, Inode, MemStore,
-    TieredStore, VersioningMode,
+    AfsError, CommitInfo, Conflict, DiffEntry, DiffStatus, DirEntry, FileKind, Hash, Inode,
+    MemStore, MergeOutcome, TieredStore, VersioningMode,
 };
 pub use bytes::Bytes;
 
@@ -144,5 +144,47 @@ impl Workspace {
 
     pub async fn set_versioning_mode(&self, mode: VersioningMode) -> Result<()> {
         self.fs.set_versioning_mode(mode).await
+    }
+
+    // --- merge + locks ---------------------------------------------------
+
+    /// Merge commit `theirs` into the current branch.
+    pub async fn merge(&self, theirs: Hash, author: &str, message: &str) -> Result<MergeOutcome> {
+        self.fs.merge(theirs, author, message).await
+    }
+
+    /// Merge branch `name` into the current branch.
+    pub async fn merge_branch(
+        &self,
+        name: &str,
+        author: &str,
+        message: &str,
+    ) -> Result<MergeOutcome> {
+        let target = self
+            .fs
+            .list_branches()
+            .await?
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, h)| h)
+            .ok_or_else(|| AfsError::NotFound(format!("branch {name}")))?;
+        self.fs.merge(target, author, message).await
+    }
+
+    /// Unresolved merge conflicts as `(path, kind)`.
+    pub async fn conflicts(&self) -> Result<Vec<(String, String)>> {
+        self.fs.conflicts().await
+    }
+
+    pub async fn lock(&self, path: &str, owner: &str) -> Result<bool> {
+        self.fs.lock(path, owner).await
+    }
+
+    pub async fn unlock(&self, path: &str, owner: &str) -> Result<bool> {
+        self.fs.unlock(path, owner).await
+    }
+
+    pub async fn locks(&self) -> Result<Vec<(String, String, i64)>> {
+        self.fs.locks().await
     }
 }

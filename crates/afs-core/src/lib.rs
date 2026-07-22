@@ -12,6 +12,7 @@ pub mod chunk;
 pub mod content;
 pub mod engine;
 pub mod error;
+pub mod merge;
 pub mod metadata;
 pub mod migrations;
 pub mod objectgraph;
@@ -26,6 +27,7 @@ pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};
 pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore};
 pub use engine::Fs;
 pub use error::{AfsError, Result};
+pub use merge::{Conflict, MergeOutcome};
 pub use metadata::MetadataStore;
 pub use objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, Tree, TreeEntry, TreeKind, VersioningMode,

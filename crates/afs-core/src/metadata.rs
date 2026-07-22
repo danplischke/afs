@@ -80,6 +80,26 @@ pub trait MetadataStore: Send + Sync {
     /// Clear the entire working tree (all dentries, symlinks, and inodes except
     /// the root) — used by `checkout` before materializing a commit.
     async fn truncate_tree(&self) -> Result<()>;
+
+    // --- merge: conflicts + locks ----------------------------------------
+
+    /// Record (upsert) an unresolved merge conflict at `path`.
+    async fn set_conflict(&self, path: &str, kind: &str) -> Result<()>;
+
+    /// List unresolved conflicts as `(path, kind)`.
+    async fn list_conflicts(&self) -> Result<Vec<(String, String)>>;
+
+    /// Clear all recorded conflicts (e.g. once a merge is committed).
+    async fn clear_conflicts(&self) -> Result<()>;
+
+    /// Acquire an exclusive lock on `path` for `owner`; `false` if already held.
+    async fn acquire_lock(&self, path: &str, owner: &str, at: i64) -> Result<bool>;
+
+    /// Release `owner`'s lock on `path`; `false` if not held by `owner`.
+    async fn release_lock(&self, path: &str, owner: &str) -> Result<bool>;
+
+    /// List held locks as `(path, owner, acquired_at)`.
+    async fn list_locks(&self) -> Result<Vec<(String, String, i64)>>;
 }
 
 /// Delegating impl so `Arc<dyn MetadataStore>` (and `Arc<ConcreteStore>`) is
@@ -148,5 +168,23 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn truncate_tree(&self) -> Result<()> {
         (**self).truncate_tree().await
+    }
+    async fn set_conflict(&self, path: &str, kind: &str) -> Result<()> {
+        (**self).set_conflict(path, kind).await
+    }
+    async fn list_conflicts(&self) -> Result<Vec<(String, String)>> {
+        (**self).list_conflicts().await
+    }
+    async fn clear_conflicts(&self) -> Result<()> {
+        (**self).clear_conflicts().await
+    }
+    async fn acquire_lock(&self, path: &str, owner: &str, at: i64) -> Result<bool> {
+        (**self).acquire_lock(path, owner, at).await
+    }
+    async fn release_lock(&self, path: &str, owner: &str) -> Result<bool> {
+        (**self).release_lock(path, owner).await
+    }
+    async fn list_locks(&self) -> Result<Vec<(String, String, i64)>> {
+        (**self).list_locks().await
     }
 }

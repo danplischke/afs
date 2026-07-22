@@ -1,0 +1,13 @@
+[package]
+name = "afs-sdk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+afs-core = { version = "0.1.0", path = "../afs-core" }
+bytes = "1.12.1"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "fs"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

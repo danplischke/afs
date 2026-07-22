@@ -1,0 +1,48 @@
+//! Error and result types for afs-core.
+
+use thiserror::Error;
+
+/// Errors surfaced by the metadata store, content store, and engine.
+#[derive(Error, Debug)]
+pub enum AfsError {
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
+    #[error("not a directory: {0}")]
+    NotADirectory(String),
+
+    #[error("is a directory: {0}")]
+    IsADirectory(String),
+
+    #[error("directory not empty: {0}")]
+    DirectoryNotEmpty(String),
+
+    #[error("invalid path: {0}")]
+    InvalidPath(String),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    #[error("content missing for hash {0}")]
+    ContentMissing(String),
+
+    #[error("metadata store error: {0}")]
+    Metadata(String),
+
+    #[error("content store error: {0}")]
+    Content(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+impl From<rusqlite::Error> for AfsError {
+    fn from(e: rusqlite::Error) -> Self {
+        AfsError::Metadata(e.to_string())
+    }
+}
+
+pub type Result<T> = std::result::Result<T, AfsError>;

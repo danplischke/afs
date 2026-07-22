@@ -33,7 +33,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M9 · Encrypt** | Encryption at rest (XChaCha20-Poly1305), dedup-preserving, transparent to the engine | ✅ done |
 | **M9 · Bench** | Criterion benchmarks over the chunk/write/read/commit hot paths + encryption overhead | ✅ done |
 | **M5 · Remote** | `git-remote-afs` helper: real `git clone` / `fetch` / `push` over `afs://` | ✅ done |
-| M7, M8 | more surfaces (NFS/API), live collaboration | ⬜ |
+| **M8** | Live collaboration: change feed + presence, Postgres `LISTEN/NOTIFY` push | ✅ done |
+| M7 | more surfaces (NFS, general HTTP/API) | ⬜ |
 
 ## Layout
 
@@ -115,6 +116,22 @@ afs --workspace "$WS" gc     # kept N object(s), deleted M (… bytes freed)
 
 Run it when the workspace is idle — it is not safe to run concurrently with
 writers.
+
+### Live collaboration
+
+In a shared human+agent workspace, every operation lands on an append-only
+**change feed** (who touched what, who committed), and each session heartbeats
+its **presence** (which actor, which path). Tail the feed by cursor, or — on the
+Postgres backend — let `LISTEN/NOTIFY` push new events so consumers never poll:
+
+```bash
+afs --workspace "$WS" watch --follow    # live feed: seq  kind  actor  path
+afs --workspace "$WS" presence          # who's active right now
+```
+
+From Rust: `Workspace::watch(cursor)`, `Workspace::presence(window_secs)`, and
+`Workspace::touch(actor, session, path)` for heartbeats. Postgres backends fire
+`NOTIFY afs_events` on every appended event.
 
 ### Coming from agentfs
 

@@ -8,6 +8,7 @@
 //! the watch API in M8).
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
+use crate::collab::{Event, EventInit, Presence, EVENT_CHANNEL};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::migrations::MIGRATIONS;
@@ -579,5 +580,90 @@ impl MetadataStore for PostgresMetadataStore {
             .query_opt("SELECT runs FROM line_blame WHERE ino = $1", &[&ino])
             .await?;
         Ok(row.map(|r| r.get(0)))
+    }
+
+    async fn append_event(&self, ev: EventInit, ts: i64) -> Result<i64> {
+        let c = self.client().await?;
+        let row = c
+            .query_one(
+                "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts)
+                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING seq",
+                &[&ev.actor_id, &ev.session_id, &ev.kind, &ev.path, &ev.detail, &ts],
+            )
+            .await?;
+        let seq: i64 = row.get(0);
+        // Push the new seq to LISTEN consumers of the change feed.
+        let chan = EVENT_CHANNEL;
+        let payload = seq.to_string();
+        c.execute("SELECT pg_notify($1, $2)", &[&chan, &payload])
+            .await?;
+        Ok(seq)
+    }
+
+    async fn events_since(&self, after_seq: i64, limit: i64) -> Result<Vec<Event>> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT seq, actor_id, session_id, kind, path, detail, ts FROM fs_event
+                 WHERE seq > $1 ORDER BY seq LIMIT $2",
+                &[&after_seq, &limit],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Event {
+                seq: r.get(0),
+                actor_id: r.get(1),
+                session_id: r.get(2),
+                kind: r.get(3),
+                path: r.get(4),
+                detail: r.get(5),
+                ts: r.get(6),
+            })
+            .collect())
+    }
+
+    async fn touch_presence(
+        &self,
+        session_id: i64,
+        actor_id: i64,
+        path: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        let c = self.client().await?;
+        c.execute(
+            "INSERT INTO presence(session_id, actor_id, path, last_seen) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (session_id) DO UPDATE SET
+                 actor_id = EXCLUDED.actor_id, path = EXCLUDED.path, last_seen = EXCLUDED.last_seen",
+            &[&session_id, &actor_id, &path, &at],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT p.session_id, p.actor_id, a.display_name, a.kind, p.path, p.last_seen
+                 FROM presence p JOIN actor a ON a.id = p.actor_id
+                 WHERE p.last_seen >= $1 ORDER BY p.last_seen DESC",
+                &[&since_ts],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let kind: String = r.get(3);
+                Presence {
+                    session_id: r.get(0),
+                    actor_id: r.get(1),
+                    display_name: r.get(2),
+                    kind: ActorKind::parse(&kind).unwrap_or(ActorKind::System),
+                    path: r.get(4),
+                    last_seen: r.get(5),
+                }
+            })
+            .collect())
     }
 }

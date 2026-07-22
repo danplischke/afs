@@ -7,6 +7,7 @@
 //! async driver like sqlx, which M2 introduces alongside Postgres).
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
+use crate::collab::{Event, EventInit, Presence};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::migrations::MIGRATIONS;
@@ -573,5 +574,81 @@ impl MetadataStore for SqliteMetadataStore {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    async fn append_event(&self, ev: EventInit, ts: i64) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![ev.actor_id, ev.session_id, ev.kind, ev.path, ev.detail, ts],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn events_since(&self, after_seq: i64, limit: i64) -> Result<Vec<Event>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT seq, actor_id, session_id, kind, path, detail, ts FROM fs_event
+             WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_seq, limit], |r| {
+            Ok(Event {
+                seq: r.get(0)?,
+                actor_id: r.get(1)?,
+                session_id: r.get(2)?,
+                kind: r.get(3)?,
+                path: r.get(4)?,
+                detail: r.get(5)?,
+                ts: r.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn touch_presence(
+        &self,
+        session_id: i64,
+        actor_id: i64,
+        path: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO presence(session_id, actor_id, path, last_seen) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET
+                 actor_id = excluded.actor_id, path = excluded.path, last_seen = excluded.last_seen",
+            params![session_id, actor_id, path, at],
+        )?;
+        Ok(())
+    }
+
+    async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT p.session_id, p.actor_id, a.display_name, a.kind, p.path, p.last_seen
+             FROM presence p JOIN actor a ON a.id = p.actor_id
+             WHERE p.last_seen >= ?1 ORDER BY p.last_seen DESC",
+        )?;
+        let rows = stmt.query_map(params![since_ts], |r| {
+            let kind: String = r.get(3)?;
+            Ok(Presence {
+                session_id: r.get(0)?,
+                actor_id: r.get(1)?,
+                display_name: r.get(2)?,
+                kind: ActorKind::parse(&kind).unwrap_or(ActorKind::System),
+                path: r.get(4)?,
+                last_seen: r.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 }

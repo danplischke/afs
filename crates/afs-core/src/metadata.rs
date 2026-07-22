@@ -3,6 +3,7 @@
 //! (`docs/DESIGN.md` §4b).
 
 use crate::attribution::{Actor, ActorInit, EditOp, EditOpInit, ToolCallInit};
+use crate::collab::{Event, EventInit, Presence};
 use crate::error::Result;
 use crate::types::{DirEntry, Hash, Ino, Inode, InodeInit};
 use async_trait::async_trait;
@@ -117,6 +118,23 @@ pub trait MetadataStore: Send + Sync {
     async fn list_edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>>;
     async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()>;
     async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>>;
+
+    // --- collaboration: change feed + presence ---------------------------
+
+    /// Append an event to the change feed, returning its monotonic `seq`.
+    async fn append_event(&self, ev: EventInit, ts: i64) -> Result<i64>;
+    /// Events strictly after `after_seq`, oldest first, capped at `limit`.
+    async fn events_since(&self, after_seq: i64, limit: i64) -> Result<Vec<Event>>;
+    /// Upsert a session's presence heartbeat (and current path).
+    async fn touch_presence(
+        &self,
+        session_id: i64,
+        actor_id: i64,
+        path: Option<&str>,
+        at: i64,
+    ) -> Result<()>;
+    /// Sessions with `last_seen >= since_ts`, most recently seen first.
+    async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>>;
 }
 
 /// Delegating impl so `Arc<dyn MetadataStore>` (and `Arc<ConcreteStore>`) is
@@ -232,5 +250,25 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>> {
         (**self).get_line_blame(ino).await
+    }
+    async fn append_event(&self, ev: EventInit, ts: i64) -> Result<i64> {
+        (**self).append_event(ev, ts).await
+    }
+    async fn events_since(&self, after_seq: i64, limit: i64) -> Result<Vec<Event>> {
+        (**self).events_since(after_seq, limit).await
+    }
+    async fn touch_presence(
+        &self,
+        session_id: i64,
+        actor_id: i64,
+        path: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        (**self)
+            .touch_presence(session_id, actor_id, path, at)
+            .await
+    }
+    async fn active_presence(&self, since_ts: i64) -> Result<Vec<Presence>> {
+        (**self).active_presence(since_ts).await
     }
 }

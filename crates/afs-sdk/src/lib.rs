@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
-    DirEntry, EditOp, EncryptedStore, FileKind, GcStats, Hash, Inode, MemStore, MergeOutcome,
-    TieredStore, ToolCallInit, VersioningMode, WriteCtx,
+    DirEntry, EditOp, EncryptedStore, Event, EventInit, FileKind, GcStats, Hash, Inode, MemStore,
+    MergeOutcome, Presence, TieredStore, ToolCallInit, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -75,8 +75,32 @@ impl Workspace {
         &self.fs
     }
 
+    /// Record a collaboration event (best-effort: a feed hiccup never fails the
+    /// underlying operation, which has already succeeded).
+    async fn emit(
+        &self,
+        kind: &str,
+        path: &str,
+        detail: Option<String>,
+        actor: Option<i64>,
+        session: Option<i64>,
+    ) {
+        let _ = self
+            .fs
+            .record_event(EventInit {
+                actor_id: actor,
+                session_id: session,
+                kind: kind.to_string(),
+                path: path.to_string(),
+                detail,
+            })
+            .await;
+    }
+
     pub async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
-        self.fs.write(path, data).await
+        self.fs.write(path, data).await?;
+        self.emit("write", path, None, None, None).await;
+        Ok(())
     }
 
     /// Write a file by streaming from a blocking reader (for large files).
@@ -85,7 +109,9 @@ impl Workspace {
         path: &str,
         reader: R,
     ) -> Result<()> {
-        self.fs.write_reader(path, reader).await
+        self.fs.write_reader(path, reader).await?;
+        self.emit("write", path, None, None, None).await;
+        Ok(())
     }
 
     pub async fn read(&self, path: &str) -> Result<Bytes> {
@@ -97,7 +123,9 @@ impl Workspace {
     }
 
     pub async fn mkdir_p(&self, path: &str) -> Result<()> {
-        self.fs.mkdir_p(path).await.map(|_| ())
+        self.fs.mkdir_p(path).await?;
+        self.emit("mkdir", path, None, None, None).await;
+        Ok(())
     }
 
     pub async fn ls(&self, path: &str) -> Result<Vec<DirEntry>> {
@@ -109,11 +137,15 @@ impl Workspace {
     }
 
     pub async fn remove(&self, path: &str) -> Result<()> {
-        self.fs.remove(path).await
+        self.fs.remove(path).await?;
+        self.emit("remove", path, None, None, None).await;
+        Ok(())
     }
 
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
-        self.fs.rename(from, to).await
+        self.fs.rename(from, to).await?;
+        self.emit("rename", from, Some(to.to_string()), None, None).await;
+        Ok(())
     }
 
     pub async fn readlink(&self, path: &str) -> Result<String> {
@@ -121,14 +153,20 @@ impl Workspace {
     }
 
     pub async fn symlink(&self, target: &str, linkpath: &str) -> Result<()> {
-        self.fs.symlink(target, linkpath).await.map(|_| ())
+        self.fs.symlink(target, linkpath).await?;
+        self.emit("symlink", linkpath, Some(target.to_string()), None, None)
+            .await;
+        Ok(())
     }
 
     // --- versioning ------------------------------------------------------
 
     /// Snapshot the working tree into a commit on the current branch.
     pub async fn commit(&self, author: &str, message: &str) -> Result<Hash> {
-        self.fs.commit(author, message).await
+        let hash = self.fs.commit(author, message).await?;
+        self.emit("commit", "/", Some(message.to_string()), None, None)
+            .await;
+        Ok(hash)
     }
 
     /// Commit history from HEAD (first-parent).
@@ -208,11 +246,21 @@ impl Workspace {
     }
 
     pub async fn lock(&self, path: &str, owner: &str) -> Result<bool> {
-        self.fs.lock(path, owner).await
+        let acquired = self.fs.lock(path, owner).await?;
+        if acquired {
+            self.emit("lock", path, Some(owner.to_string()), None, None)
+                .await;
+        }
+        Ok(acquired)
     }
 
     pub async fn unlock(&self, path: &str, owner: &str) -> Result<bool> {
-        self.fs.unlock(path, owner).await
+        let released = self.fs.unlock(path, owner).await?;
+        if released {
+            self.emit("unlock", path, Some(owner.to_string()), None, None)
+                .await;
+        }
+        Ok(released)
     }
 
     pub async fn locks(&self) -> Result<Vec<(String, String, i64)>> {
@@ -246,7 +294,10 @@ impl Workspace {
 
     /// Attributed write: records the actor and updates per-line authorship.
     pub async fn write_as(&self, ctx: WriteCtx, path: &str, data: &[u8]) -> Result<()> {
-        self.fs.write_as(ctx, path, data).await
+        self.fs.write_as(ctx, path, data).await?;
+        self.emit("write", path, None, Some(ctx.actor), ctx.session)
+            .await;
+        Ok(())
     }
 
     /// Per-line-range authorship for a path (human vs agent).
@@ -262,5 +313,29 @@ impl Workspace {
     /// Revert every line an actor wrote in a session. Returns files changed.
     pub async fn revert_session(&self, actor_id: i64, session_id: i64) -> Result<usize> {
         self.fs.revert_session(actor_id, session_id).await
+    }
+
+    // --- live collaboration ----------------------------------------------
+
+    /// Tail the change feed: events strictly after `after_seq`, oldest first.
+    /// Poll with the last seen `seq` as the cursor (Postgres also fires
+    /// `NOTIFY afs_events` so consumers can be pushed instead of polling).
+    pub async fn watch(&self, after_seq: i64) -> Result<Vec<Event>> {
+        self.fs.events_since(after_seq, 1000).await
+    }
+
+    /// Record an arbitrary event on the change feed.
+    pub async fn record_event(&self, ev: EventInit) -> Result<i64> {
+        self.fs.record_event(ev).await
+    }
+
+    /// Heartbeat a session's presence (and the path it is working on).
+    pub async fn touch(&self, actor_id: i64, session_id: i64, path: Option<&str>) -> Result<()> {
+        self.fs.touch_presence(session_id, actor_id, path).await
+    }
+
+    /// Sessions active within the last `window_secs` seconds.
+    pub async fn presence(&self, window_secs: i64) -> Result<Vec<Presence>> {
+        self.fs.presence(window_secs).await
     }
 }

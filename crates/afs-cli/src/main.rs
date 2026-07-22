@@ -143,6 +143,21 @@ enum Cmd {
     },
     /// Reclaim content unreachable from any branch or the working tree.
     Gc,
+    /// Tail the change feed (who changed what). `--follow` polls for new events.
+    Watch {
+        /// Only show events after this seq cursor.
+        #[arg(long, default_value_t = 0)]
+        since: i64,
+        /// Keep polling for new events instead of exiting.
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Show the sessions currently active in the workspace.
+    Presence {
+        /// Consider sessions seen within this many seconds active.
+        #[arg(long, default_value_t = 60)]
+        window: i64,
+    },
     /// Import a `tursodatabase/agentfs` SQLite database into this workspace.
     ImportAgentfs {
         /// Path to the agentfs `.db` file.
@@ -469,6 +484,35 @@ async fn main() -> Result<()> {
                 "gc: kept {} object(s), deleted {} ({} bytes freed)",
                 stats.reachable, stats.deleted, stats.bytes_freed
             );
+        }
+        Cmd::Watch { since, follow } => {
+            let mut cursor = since;
+            loop {
+                for e in ws.watch(cursor).await? {
+                    let who = e
+                        .actor_id
+                        .map(|a| format!("actor:{a}"))
+                        .unwrap_or_else(|| "-".to_string());
+                    let detail = e.detail.map(|d| format!("  ({d})")).unwrap_or_default();
+                    println!("{}\t{}\t{who}\t{}{detail}", e.seq, e.kind, e.path);
+                    cursor = e.seq;
+                }
+                if !follow {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+        Cmd::Presence { window } => {
+            for p in ws.presence(window).await? {
+                let path = p.path.unwrap_or_else(|| "-".to_string());
+                println!(
+                    "{}\t{}\t{path}\t(seen {})",
+                    p.kind.as_str(),
+                    p.display_name,
+                    p.last_seen
+                );
+            }
         }
         Cmd::ImportAgentfs {
             db,

@@ -27,15 +27,19 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M6** | Per-actor attribution + blame (human vs agent), edit-op audit, revert | ✅ done |
 | **Sandbox** | Isolated overlayfs CoW runs, imported back as attributed changes | ✅ done |
 | **FUSE** | Mount the workspace as a POSIX filesystem (real read/write mount) | ✅ done |
-| M5, M7–M9 | git interop, more surfaces (NFS/MCP/API), live collaboration, hardening | ⬜ |
+| **MCP** | Serve the workspace to agents over MCP (JSON-RPC/stdio); writes attributed | ✅ done |
+| M5, M7–M9 | git interop, more surfaces (NFS/API), live collaboration, hardening | ⬜ |
 
 ## Layout
 
 ```
 crates/
-  afs-core/   # MetadataStore + ContentStore traits, SQLite + local-CAS impls, the Fs engine
-  afs-sdk/    # ergonomic Workspace façade
-  afs-cli/    # `afs` command-line tool
+  afs-core/     # MetadataStore + ContentStore traits, SQLite/Postgres + CAS/S3 impls, the Fs engine
+  afs-sdk/      # ergonomic Workspace façade
+  afs-cli/      # `afs` command-line tool
+  afs-sandbox/  # overlayfs copy-on-write sandbox runs, imported as attributed changes
+  afs-fuse/     # mount the workspace as a POSIX filesystem via FUSE
+  afs-mcp/      # serve the workspace to agents over the Model Context Protocol
 docs/DESIGN.md
 ```
 

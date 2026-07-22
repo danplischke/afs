@@ -128,6 +128,14 @@ enum Cmd {
     /// Mount the workspace as a POSIX filesystem via FUSE (blocks until
     /// unmounted; needs root + /dev/fuse).
     Mount { mountpoint: PathBuf },
+    /// Serve the workspace to agents over MCP (JSON-RPC on stdio). Every write
+    /// is attributed to the given agent.
+    Mcp {
+        #[arg(long, default_value = "mcp-agent")]
+        agent_name: String,
+        #[arg(long, default_value = "unknown")]
+        model: String,
+    },
 }
 
 #[tokio::main]
@@ -366,6 +374,10 @@ async fn main() -> Result<()> {
             handle
                 .join()
                 .map_err(|_| anyhow::anyhow!("mount thread panicked"))??;
+        }
+        Cmd::Mcp { agent_name, model } => {
+            let server = afs_mcp::McpServer::create(ws, &agent_name, &model).await?;
+            server.serve_stdio().await?;
         }
     }
     Ok(())

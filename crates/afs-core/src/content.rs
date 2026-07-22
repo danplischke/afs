@@ -19,6 +19,16 @@ pub trait ContentStore: Send + Sync {
     /// Store `bytes` and return their content address.
     async fn put(&self, bytes: &[u8]) -> Result<Hash>;
 
+    /// Store `bytes` under an explicit `key` rather than `Hash::of(bytes)`.
+    ///
+    /// This exists for transforming layers such as [`EncryptedStore`], which
+    /// keep the plaintext hash as the address while storing ciphertext. The
+    /// caller owns the addressing invariant; content-addressed backends simply
+    /// write the bytes at `key`.
+    ///
+    /// [`EncryptedStore`]: crate::encrypt::EncryptedStore
+    async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()>;
+
     /// Fetch the full blob for `hash`.
     async fn get(&self, hash: &Hash) -> Result<Bytes>;
 
@@ -61,6 +71,18 @@ impl LocalCasStore {
     async fn exists(path: &Path) -> bool {
         tokio::fs::metadata(path).await.is_ok()
     }
+
+    /// Write `bytes` at `path` via a temp sibling + rename, so readers never
+    /// observe a partial blob.
+    async fn write_at(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let tmp = path.with_extension("tmp");
+        tokio::fs::write(&tmp, bytes).await?;
+        tokio::fs::rename(&tmp, path).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -71,14 +93,16 @@ impl ContentStore for LocalCasStore {
         if Self::exists(&path).await {
             return Ok(hash); // already stored — content-addressed, so identical
         }
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        // Write to a temp sibling then rename, so readers never see a partial blob.
-        let tmp = path.with_extension("tmp");
-        tokio::fs::write(&tmp, bytes).await?;
-        tokio::fs::rename(&tmp, &path).await?;
+        self.write_at(&path, bytes).await?;
         Ok(hash)
+    }
+
+    async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        let path = self.path_for(key);
+        if Self::exists(&path).await {
+            return Ok(());
+        }
+        self.write_at(&path, bytes).await
     }
 
     async fn get(&self, hash: &Hash) -> Result<Bytes> {
@@ -153,6 +177,9 @@ impl<T: ContentStore + ?Sized> ContentStore for Arc<T> {
     async fn put(&self, bytes: &[u8]) -> Result<Hash> {
         (**self).put(bytes).await
     }
+    async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        (**self).put_keyed(key, bytes).await
+    }
     async fn get(&self, hash: &Hash) -> Result<Bytes> {
         (**self).get(hash).await
     }
@@ -201,6 +228,15 @@ impl ContentStore for MemStore {
             .entry(hash)
             .or_insert_with(|| Bytes::copy_from_slice(bytes));
         Ok(hash)
+    }
+
+    async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        self.map
+            .lock()
+            .expect("mem store poisoned")
+            .entry(*key)
+            .or_insert_with(|| Bytes::copy_from_slice(bytes));
+        Ok(())
     }
 
     async fn get(&self, hash: &Hash) -> Result<Bytes> {
@@ -283,6 +319,12 @@ impl ContentStore for TieredStore {
         let hash = self.backend.put(bytes).await?;
         let _ = self.cache.put(bytes).await; // best-effort
         Ok(hash)
+    }
+
+    async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        self.backend.put_keyed(key, bytes).await?;
+        let _ = self.cache.put_keyed(key, bytes).await; // best-effort
+        Ok(())
     }
 
     async fn get(&self, hash: &Hash) -> Result<Bytes> {

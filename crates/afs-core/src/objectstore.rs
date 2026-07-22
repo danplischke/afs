@@ -89,6 +89,18 @@ impl ContentStore for ObjectContentStore {
         Ok(hash)
     }
 
+    async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        let path = self.path_for(key);
+        if self.store.head(&path).await.is_ok() {
+            return Ok(());
+        }
+        self.store
+            .put(&path, PutPayload::from(bytes.to_vec()))
+            .await
+            .map_err(AfsError::from)?;
+        Ok(())
+    }
+
     async fn get(&self, hash: &Hash) -> Result<Bytes> {
         let path = self.path_for(hash);
         match self.store.get(&path).await {

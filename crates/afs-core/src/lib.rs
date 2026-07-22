@@ -11,6 +11,7 @@
 pub mod attribution;
 pub mod chunk;
 pub mod content;
+pub mod encrypt;
 pub mod engine;
 pub mod error;
 pub mod gc;
@@ -30,6 +31,7 @@ pub mod vfs;
 pub use attribution::{Actor, ActorInit, ActorKind, BlameRange, EditOp, ToolCallInit, WriteCtx};
 pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};
 pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore};
+pub use encrypt::EncryptedStore;
 pub use engine::Fs;
 pub use error::{AfsError, Result};
 pub use gc::GcStats;

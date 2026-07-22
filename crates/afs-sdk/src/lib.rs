@@ -13,8 +13,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use afs_core::{
-    AfsError, CommitInfo, Conflict, DiffEntry, DiffStatus, DirEntry, FileKind, Hash, Inode,
-    MemStore, MergeOutcome, TieredStore, VersioningMode,
+    Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
+    DirEntry, EditOp, FileKind, Hash, Inode, MemStore, MergeOutcome, TieredStore, ToolCallInit,
+    VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -186,5 +187,50 @@ impl Workspace {
 
     pub async fn locks(&self) -> Result<Vec<(String, String, i64)>> {
         self.fs.locks().await
+    }
+
+    // --- attribution -----------------------------------------------------
+
+    /// Register a human actor.
+    pub async fn create_human(&self, name: &str, auth_subject: Option<&str>) -> Result<i64> {
+        self.fs.create_human(name, auth_subject).await
+    }
+
+    /// Register an agent actor, optionally with the human that launched it.
+    pub async fn create_agent(
+        &self,
+        name: &str,
+        model: &str,
+        controller: Option<i64>,
+    ) -> Result<i64> {
+        self.fs.create_agent(name, model, controller).await
+    }
+
+    pub async fn get_actor(&self, id: i64) -> Result<Option<Actor>> {
+        self.fs.get_actor(id).await
+    }
+
+    pub async fn create_session(&self, actor_id: i64, client: Option<&str>) -> Result<i64> {
+        self.fs.create_session(actor_id, client).await
+    }
+
+    /// Attributed write: records the actor and updates per-line authorship.
+    pub async fn write_as(&self, ctx: WriteCtx, path: &str, data: &[u8]) -> Result<()> {
+        self.fs.write_as(ctx, path, data).await
+    }
+
+    /// Per-line-range authorship for a path (human vs agent).
+    pub async fn blame(&self, path: &str) -> Result<Vec<BlameRange>> {
+        self.fs.blame(path).await
+    }
+
+    /// The edit-op log for an actor (optionally one session).
+    pub async fn edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>> {
+        self.fs.edit_ops(actor_id, session_id).await
+    }
+
+    /// Revert every line an actor wrote in a session. Returns files changed.
+    pub async fn revert_session(&self, actor_id: i64, session_id: i64) -> Result<usize> {
+        self.fs.revert_session(actor_id, session_id).await
     }
 }

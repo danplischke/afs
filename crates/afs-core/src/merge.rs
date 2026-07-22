@@ -110,7 +110,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     // --- file bodies ------------------------------------------------------
 
-    async fn read_body(&self, mhash: &Hash) -> Result<Vec<u8>> {
+    pub(crate) async fn read_body(&self, mhash: &Hash) -> Result<Vec<u8>> {
         let manifest = self.load_manifest(mhash).await?;
         let mut buf = Vec::with_capacity(manifest.size as usize);
         for c in &manifest.chunks {

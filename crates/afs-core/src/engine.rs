@@ -48,7 +48,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     }
 
     /// Resolve an absolute path to its inode.
-    async fn resolve(&self, path: &str) -> Result<Ino> {
+    pub(crate) async fn resolve(&self, path: &str) -> Result<Ino> {
         let mut ino = INO_ROOT;
         for seg in Self::split(path)? {
             ino = self
@@ -61,7 +61,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     }
 
     /// Resolve a path's parent directory inode and return `(parent, basename)`.
-    async fn resolve_parent<'a>(&self, path: &'a str) -> Result<(Ino, &'a str)> {
+    pub(crate) async fn resolve_parent<'a>(&self, path: &'a str) -> Result<(Ino, &'a str)> {
         let segs = Self::split(path)?;
         let (name, dirs) = segs
             .split_last()
@@ -77,7 +77,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         Ok((ino, *name))
     }
 
-    async fn ensure_dir(&self, ino: Ino) -> Result<()> {
+    pub(crate) async fn ensure_dir(&self, ino: Ino) -> Result<()> {
         let inode = self
             .meta
             .get_inode(ino)
@@ -176,7 +176,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     // --- file operations --------------------------------------------------
 
     /// Resolve or create the file inode for `(parent, name)`.
-    async fn ensure_file(&self, parent: Ino, name: &str, path: &str) -> Result<Ino> {
+    pub(crate) async fn ensure_file(&self, parent: Ino, name: &str, path: &str) -> Result<Ino> {
         match self.meta.lookup(parent, name).await? {
             Some(existing) => {
                 let inode = self

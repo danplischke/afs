@@ -9,7 +9,7 @@
 //! afs --workspace ./ws read /notes/a.txt
 //! ```
 
-use afs_sdk::{MergeOutcome, Workspace};
+use afs_sdk::{MergeOutcome, Workspace, WriteCtx};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
@@ -42,6 +42,9 @@ enum Cmd {
         /// Read data from this file instead of stdin.
         #[arg(long)]
         from: Option<PathBuf>,
+        /// Attribute the write to this actor id (records blame + an edit-op).
+        #[arg(long)]
+        actor: Option<i64>,
     },
     /// Print a file's contents to stdout.
     Read { path: String },
@@ -95,6 +98,19 @@ enum Cmd {
     },
     /// List held locks.
     Locks,
+    /// Register an actor (human by default; `--agent` for an agent).
+    Actor {
+        name: String,
+        #[arg(long)]
+        agent: bool,
+        #[arg(long, default_value = "unknown")]
+        model: String,
+        /// The human actor id that launched this agent.
+        #[arg(long)]
+        controller: Option<i64>,
+    },
+    /// Show per-line authorship (blame) for a file.
+    Blame { path: String },
 }
 
 #[tokio::main]
@@ -112,7 +128,7 @@ async fn main() -> Result<()> {
         Cmd::Mkdir { path } => {
             ws.mkdir_p(&path).await?;
         }
-        Cmd::Write { path, from } => {
+        Cmd::Write { path, from, actor } => {
             // Convenience: ensure the parent directory exists before writing.
             if let Some(parent) = path
                 .rsplit_once('/')
@@ -121,13 +137,27 @@ async fn main() -> Result<()> {
             {
                 ws.mkdir_p(parent).await?;
             }
-            match from {
-                // Stream from a file so large files never need full residency.
-                Some(p) => {
+            match (from, actor) {
+                // Unattributed streaming from a file (large files stay off-heap).
+                (Some(p), None) => {
                     let file = std::fs::File::open(p)?;
                     ws.write_reader(&path, file).await?;
                 }
-                None => {
+                // Attributed write: read into memory, record blame + an edit-op.
+                (from, Some(actor)) => {
+                    let data = match from {
+                        Some(p) => std::fs::read(p)?,
+                        None => {
+                            let mut buf = Vec::new();
+                            std::io::stdin().read_to_end(&mut buf)?;
+                            buf
+                        }
+                    };
+                    let session = ws.create_session(actor, Some("cli")).await?;
+                    ws.write_as(WriteCtx::session(actor, session), &path, &data)
+                        .await?;
+                }
+                (None, None) => {
                     let mut buf = Vec::new();
                     std::io::stdin().read_to_end(&mut buf)?;
                     ws.write(&path, &buf).await?;
@@ -250,6 +280,29 @@ async fn main() -> Result<()> {
         Cmd::Locks => {
             for (path, owner, _at) in ws.locks().await? {
                 println!("{owner}\t{path}");
+            }
+        }
+        Cmd::Actor {
+            name,
+            agent,
+            model,
+            controller,
+        } => {
+            let id = if agent {
+                ws.create_agent(&name, &model, controller).await?
+            } else {
+                ws.create_human(&name, None).await?
+            };
+            println!("{id}");
+        }
+        Cmd::Blame { path } => {
+            for r in ws.blame(&path).await? {
+                let who = format!("{}:{}", r.actor.kind.as_str(), r.actor.display_name);
+                if r.line_start == r.line_end {
+                    println!("{:>4}       {who}", r.line_start);
+                } else {
+                    println!("{:>4}-{:<4}  {who}", r.line_start, r.line_end);
+                }
             }
         }
     }

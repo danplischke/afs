@@ -7,6 +7,7 @@ name = "afs-cli"
 version = "0.1.0"
 dependencies = [
  "afs-fuse",
+ "afs-mcp",
  "afs-sandbox",
  "afs-sdk",
  "anyhow",
@@ -43,6 +44,17 @@ dependencies = [
  "afs-sdk",
  "fuser",
  "libc",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "afs-mcp"
+version = "0.0.0"
+dependencies = [
+ "afs-sdk",
+ "anyhow",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

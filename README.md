@@ -28,7 +28,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **Sandbox** | Isolated overlayfs CoW runs, imported back as attributed changes | ✅ done |
 | **FUSE** | Mount the workspace as a POSIX filesystem (real read/write mount) | ✅ done |
 | **MCP** | Serve the workspace to agents over MCP (JSON-RPC/stdio); writes attributed | ✅ done |
-| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, hardening | ⬜ |
+| **M9 · GC** | Mark-and-sweep garbage collection: reclaim content no ref or live file references | ✅ done |
+| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, rest of hardening (encryption, benchmarks, agentfs import) | ⬜ |
 
 ## Layout
 
@@ -86,6 +87,19 @@ afs --workspace "$WS2" git import ./repo --branch main
 
 Large files can be exported as git-LFS pointer blobs (`--lfs-threshold <bytes>`),
 backed by afs's content-addressed chunk store.
+
+### Reclaiming space
+
+Content is addressed and never overwritten, so churn (overwrites, deleted files,
+abandoned branches) leaves orphaned chunks behind. Garbage collection is a
+mark-and-sweep from the refs and the live working tree:
+
+```bash
+afs --workspace "$WS" gc     # kept N object(s), deleted M (… bytes freed)
+```
+
+Run it when the workspace is idle — it is not safe to run concurrently with
+writers.
 
 ## Development
 

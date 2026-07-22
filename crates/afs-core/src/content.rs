@@ -27,6 +27,14 @@ pub trait ContentStore: Send + Sync {
 
     /// Whether `hash` is present.
     async fn has(&self, hash: &Hash) -> Result<bool>;
+
+    /// Enumerate every stored object's content address. Used by garbage
+    /// collection to find unreachable objects.
+    async fn list(&self) -> Result<Vec<Hash>>;
+
+    /// Delete an object, returning the bytes freed. Idempotent: deleting an
+    /// absent hash succeeds and frees `0`.
+    async fn delete(&self, hash: &Hash) -> Result<u64>;
 }
 
 /// A content-addressed store backed by a local directory.
@@ -96,6 +104,46 @@ impl ContentStore for LocalCasStore {
     async fn has(&self, hash: &Hash) -> Result<bool> {
         Ok(Self::exists(&self.path_for(hash)).await)
     }
+
+    async fn list(&self) -> Result<Vec<Hash>> {
+        let objects = self.root.join("objects");
+        let mut out = Vec::new();
+        let mut shards = match tokio::fs::read_dir(&objects).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(shard) = shards.next_entry().await? {
+            if !shard.file_type().await?.is_dir() {
+                continue;
+            }
+            let prefix = shard.file_name().to_string_lossy().into_owned();
+            let mut entries = tokio::fs::read_dir(shard.path()).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".tmp") {
+                    continue; // an in-flight write; not yet a committed object
+                }
+                if let Some(h) = Hash::from_hex(&format!("{prefix}{name}")) {
+                    out.push(h);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<u64> {
+        let path = self.path_for(hash);
+        let size = match tokio::fs::metadata(&path).await {
+            Ok(m) => m.len(),
+            Err(_) => return Ok(0),
+        };
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(size),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// Delegating impl so `Arc<dyn ContentStore>` (and `Arc<ConcreteStore>`) is itself
@@ -113,6 +161,12 @@ impl<T: ContentStore + ?Sized> ContentStore for Arc<T> {
     }
     async fn has(&self, hash: &Hash) -> Result<bool> {
         (**self).has(hash).await
+    }
+    async fn list(&self) -> Result<Vec<Hash>> {
+        (**self).list().await
+    }
+    async fn delete(&self, hash: &Hash) -> Result<u64> {
+        (**self).delete(hash).await
     }
 }
 
@@ -172,6 +226,26 @@ impl ContentStore for MemStore {
             .expect("mem store poisoned")
             .contains_key(hash))
     }
+
+    async fn list(&self) -> Result<Vec<Hash>> {
+        Ok(self
+            .map
+            .lock()
+            .expect("mem store poisoned")
+            .keys()
+            .copied()
+            .collect())
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<u64> {
+        Ok(self
+            .map
+            .lock()
+            .expect("mem store poisoned")
+            .remove(hash)
+            .map(|b| b.len() as u64)
+            .unwrap_or(0))
+    }
 }
 
 /// A two-tier store: a fast local `cache` in front of a (possibly remote)
@@ -229,5 +303,17 @@ impl ContentStore for TieredStore {
 
     async fn has(&self, hash: &Hash) -> Result<bool> {
         Ok(self.cache.has(hash).await? || self.backend.has(hash).await?)
+    }
+
+    async fn list(&self) -> Result<Vec<Hash>> {
+        // The backend is authoritative (writes are write-through); the cache
+        // holds only a subset.
+        self.backend.list().await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<u64> {
+        let freed = self.backend.delete(hash).await?;
+        let _ = self.cache.delete(hash).await; // best-effort cache eviction
+        Ok(freed)
     }
 }

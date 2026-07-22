@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
-    DirEntry, EditOp, FileKind, Hash, Inode, MemStore, MergeOutcome, TieredStore, ToolCallInit,
-    VersioningMode, WriteCtx,
+    DirEntry, EditOp, FileKind, GcStats, Hash, Inode, MemStore, MergeOutcome, TieredStore,
+    ToolCallInit, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -153,6 +153,14 @@ impl Workspace {
 
     pub async fn set_versioning_mode(&self, mode: VersioningMode) -> Result<()> {
         self.fs.set_versioning_mode(mode).await
+    }
+
+    // --- maintenance -----------------------------------------------------
+
+    /// Reclaim content-store objects unreachable from any ref or the live
+    /// working tree. Run when the workspace is idle.
+    pub async fn gc(&self) -> Result<GcStats> {
+        self.fs.gc().await
     }
 
     // --- merge + locks ---------------------------------------------------

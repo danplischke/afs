@@ -13,6 +13,7 @@ pub mod chunk;
 pub mod content;
 pub mod engine;
 pub mod error;
+pub mod gc;
 pub mod interop;
 pub mod merge;
 pub mod metadata;
@@ -31,6 +32,7 @@ pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};
 pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore};
 pub use engine::Fs;
 pub use error::{AfsError, Result};
+pub use gc::GcStats;
 pub use merge::{Conflict, MergeOutcome};
 pub use metadata::MetadataStore;
 pub use objectgraph::{

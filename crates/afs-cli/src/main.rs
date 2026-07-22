@@ -141,6 +141,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: GitCmd,
     },
+    /// Reclaim content unreachable from any branch or the working tree.
+    Gc,
 }
 
 #[derive(Subcommand)]
@@ -442,6 +444,13 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Cmd::Gc => {
+            let stats = ws.gc().await?;
+            println!(
+                "gc: kept {} object(s), deleted {} ({} bytes freed)",
+                stats.reachable, stats.deleted, stats.bytes_freed
+            );
+        }
     }
     Ok(())
 }

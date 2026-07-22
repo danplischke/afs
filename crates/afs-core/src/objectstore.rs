@@ -128,4 +128,36 @@ impl ContentStore for ObjectContentStore {
             Err(e) => Err(AfsError::from(e)),
         }
     }
+
+    async fn list(&self) -> Result<Vec<Hash>> {
+        use futures::StreamExt;
+        let prefix = OsPath::from(self.prefix.clone());
+        let mut stream = self.store.list(Some(&prefix));
+        let mut out = Vec::new();
+        while let Some(meta) = stream.next().await {
+            let location = meta.map_err(AfsError::from)?.location;
+            // `<prefix>/<aa>/<rest>` -> the 64-char hex address.
+            let parts: Vec<&str> = location.as_ref().rsplit('/').collect();
+            if parts.len() >= 2
+                && let Some(h) = Hash::from_hex(&format!("{}{}", parts[1], parts[0]))
+            {
+                out.push(h);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<u64> {
+        let path = self.path_for(hash);
+        let size = match self.store.head(&path).await {
+            Ok(m) => m.size,
+            Err(object_store::Error::NotFound { .. }) => return Ok(0),
+            Err(e) => return Err(AfsError::from(e)),
+        };
+        match self.store.delete(&path).await {
+            Ok(()) => Ok(size),
+            Err(object_store::Error::NotFound { .. }) => Ok(0),
+            Err(e) => Err(AfsError::from(e)),
+        }
+    }
 }

@@ -200,7 +200,8 @@ pub enum VersioningMode {
     Off,
     /// afs's native content-addressed commit DAG.
     Native,
-    /// git-interoperable objects (encoding lands in M5; behaves as native here).
+    /// Native commit DAG plus git interop: the `afs-git` bridge exports/imports
+    /// genuine git objects (SHA-1 or SHA-256) so the real `git` CLI can drive it.
     Git,
 }
 

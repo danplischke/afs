@@ -29,11 +29,14 @@ pub struct EventInit {
     pub actor_id: Option<i64>,
     pub session_id: Option<i64>,
     /// A short verb: `write`, `mkdir`, `remove`, `rename`, `symlink`, `commit`,
-    /// `lock`, `unlock`.
+    /// `lock`, `unlock`, `suggest`.
     pub kind: String,
     pub path: String,
     /// Optional extra context (rename target, commit message, lock owner, …).
     pub detail: Option<String>,
+    /// The branch the change happened on (`None` for detached HEAD / unknown),
+    /// so a per-branch UI can attribute and filter the feed.
+    pub branch: Option<String>,
 }
 
 /// A recorded feed event.
@@ -46,6 +49,7 @@ pub struct Event {
     pub path: String,
     pub detail: Option<String>,
     pub ts: i64,
+    pub branch: Option<String>,
 }
 
 /// A currently-active session: who it is and where they are.

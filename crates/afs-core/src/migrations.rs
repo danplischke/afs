@@ -45,7 +45,17 @@ pub const MIGRATIONS: &[Migration] = &[
         sqlite: V5_SQLITE,
         postgres: V5_POSTGRES,
     },
+    // V6 — branch-scoped change feed: tag each event with the branch it happened
+    // on so a UI showing `main` can attribute/filter edits per branch. Plain
+    // `ADD COLUMN` in both dialects.
+    Migration {
+        version: 6,
+        sqlite: V6,
+        postgres: V6,
+    },
 ];
+
+const V6: &str = "ALTER TABLE fs_event ADD COLUMN branch TEXT;";
 
 const V5_SQLITE: &str = "
 CREATE TABLE IF NOT EXISTS fs_event(

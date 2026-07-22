@@ -117,6 +117,9 @@ impl Workspace {
         actor: Option<i64>,
         session: Option<i64>,
     ) {
+        // Tag the event with the branch it happened on so a per-branch UI can
+        // filter the feed. Best-effort, like the emit itself.
+        let branch = self.fs.current_branch().await.ok().flatten();
         let _ = self
             .fs
             .record_event(EventInit {
@@ -125,6 +128,7 @@ impl Workspace {
                 kind: kind.to_string(),
                 path: path.to_string(),
                 detail,
+                branch,
             })
             .await;
     }

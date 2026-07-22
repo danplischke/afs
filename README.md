@@ -37,7 +37,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **M7 · API** | HTTP/JSON surface: files, versioning, blame, change feed, presence | ✅ done |
 | **Pack layer** | Batch chunks into large pack objects for object storage; ranged reads + repack | ✅ done |
 | **NFS** | Serve the workspace over NFSv3 (`nfsserve`), mountable by any NFS client | ✅ done |
-| Optional | Blocking Postgres `subscribe()` stream; packed-object git import | ⬜ |
+| **Live feed** | Blocking Postgres `LISTEN/NOTIFY` push subscription; branch-scoped change feed | ✅ done |
+| Optional | Packed-object git import | ⬜ |
 
 ## Layout
 
@@ -155,8 +156,12 @@ afs --workspace "$WS" presence          # who's active right now
 ```
 
 From Rust: `Workspace::watch(cursor)`, `Workspace::presence(window_secs)`, and
-`Workspace::touch(actor, session, path)` for heartbeats. Postgres backends fire
-`NOTIFY afs_events` on every appended event.
+`Workspace::touch(actor, session, path)` for heartbeats. On Postgres,
+`PostgresMetadataStore::subscribe(after_seq, branch)` returns a blocking
+`LISTEN`-backed [`EventSubscription`] whose `recv()` wakes on every committed
+change and yields the new events in order — a real push, not a poll. Each event
+is **branch-scoped**, so a UI showing `main` can filter the feed to one branch
+(`subscribe(seq, Some("feature"))`, or `GET /events?branch=feature`).
 
 ### HTTP API
 

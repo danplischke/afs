@@ -16,14 +16,19 @@ use crate::types::{DirEntry, FileKind, Hash, Ino, Inode, InodeInit};
 use crate::util::now_secs;
 use async_trait::async_trait;
 use deadpool_postgres::{Manager, Pool};
+use futures::StreamExt;
+use std::pin::Pin;
 use tokio_postgres::error::SqlState;
-use tokio_postgres::{NoTls, Row};
+use tokio_postgres::{AsyncMessage, NoTls, Row};
 
 const DIR_MODE: i64 = 0o040755;
 
 /// A metadata store backed by a Postgres database (with a connection pool).
 pub struct PostgresMetadataStore {
     pool: Pool,
+    /// Kept so [`Self::subscribe`] can open a dedicated `LISTEN` connection
+    /// (pooled connections can't surface async notifications).
+    dsn: String,
 }
 
 impl PostgresMetadataStore {
@@ -38,7 +43,10 @@ impl PostgresMetadataStore {
             .max_size(16)
             .build()
             .map_err(|e| AfsError::Metadata(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            dsn: dsn.to_string(),
+        })
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Object> {
@@ -64,13 +72,152 @@ impl PostgresMetadataStore {
         Ok(row.get::<_, bool>(0))
     }
 
-    /// Send a `LISTEN/NOTIFY` message (change-feed plumbing; the watch consumer
-    /// arrives in M8).
+    /// Send a `LISTEN/NOTIFY` message (change-feed plumbing).
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<()> {
         let c = self.client().await?;
         c.execute("SELECT pg_notify($1, $2)", &[&channel, &payload])
             .await?;
         Ok(())
+    }
+
+    /// Subscribe to the change feed with a real `LISTEN` — a **blocking push**
+    /// stream, not a poll. Returns an [`EventSubscription`] whose `recv()` wakes
+    /// on every committed change and yields the new [`Event`]s in order.
+    ///
+    /// `after_seq` is the cursor to start from (`0` for everything, or the last
+    /// seq the caller has already seen). `branch`, if given, filters the stream
+    /// to changes on that branch — the per-branch feed a multi-branch UI wants.
+    ///
+    /// Correctness: we `LISTEN` first, then the query is the source of truth on
+    /// every wake, so notifications that coalesce or race the initial read never
+    /// drop an event.
+    pub async fn subscribe(
+        &self,
+        after_seq: i64,
+        branch: Option<String>,
+    ) -> Result<EventSubscription> {
+        let (client, mut connection) = tokio_postgres::connect(&self.dsn, NoTls)
+            .await
+            .map_err(|e| AfsError::Metadata(e.to_string()))?;
+
+        // The connection future both drives the socket and surfaces async
+        // NOTIFYs; forward each notification to the receiver as a bare wakeup.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut stream =
+                futures::stream::poll_fn(move |cx| Pin::new(&mut connection).poll_message(cx));
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(AsyncMessage::Notification(_)) => {
+                        if tx.send(()).is_err() {
+                            break; // the subscriber was dropped
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+
+        client
+            .batch_execute(&format!("LISTEN {EVENT_CHANNEL}"))
+            .await
+            .map_err(|e| AfsError::Metadata(e.to_string()))?;
+
+        Ok(EventSubscription {
+            client,
+            wakeups: rx,
+            cursor: after_seq,
+            branch,
+        })
+    }
+}
+
+/// A live `LISTEN`-backed subscription to the change feed. Dropping it tears
+/// down the dedicated connection and stops the feed.
+pub struct EventSubscription {
+    client: tokio_postgres::Client,
+    wakeups: tokio::sync::mpsc::UnboundedReceiver<()>,
+    cursor: i64,
+    branch: Option<String>,
+}
+
+impl EventSubscription {
+    /// Block until at least one new event is available, then return the batch
+    /// (ordered by `seq`) and advance the cursor. Returns `Ok(vec![])` only once
+    /// the underlying connection has closed.
+    pub async fn recv(&mut self) -> Result<Vec<Event>> {
+        loop {
+            let batch = self.drain().await?;
+            if !batch.is_empty() {
+                return Ok(batch);
+            }
+            // Nothing new yet — park until a NOTIFY wakes us, then re-drain.
+            if self.wakeups.recv().await.is_none() {
+                return Ok(Vec::new());
+            }
+        }
+    }
+
+    /// Fetch every event past the cursor (optionally filtered to `branch`) and
+    /// advance the cursor past them.
+    async fn drain(&mut self) -> Result<Vec<Event>> {
+        let rows = match &self.branch {
+            Some(b) => {
+                self.client
+                    .query(
+                        "SELECT seq, actor_id, session_id, kind, path, detail, ts, branch
+                         FROM fs_event WHERE seq > $1 AND branch = $2 ORDER BY seq",
+                        &[&self.cursor, b],
+                    )
+                    .await
+            }
+            None => {
+                self.client
+                    .query(
+                        "SELECT seq, actor_id, session_id, kind, path, detail, ts, branch
+                         FROM fs_event WHERE seq > $1 ORDER BY seq",
+                        &[&self.cursor],
+                    )
+                    .await
+            }
+        }
+        .map_err(|e| AfsError::Metadata(e.to_string()))?;
+
+        let events: Vec<Event> = rows.iter().map(row_to_event).collect();
+        // Advance past the max seq we *saw*, so a branch filter still moves the
+        // cursor forward and we don't re-scan skipped rows on the next wake.
+        if let Some(last) = events.last() {
+            self.cursor = last.seq;
+        } else if self.branch.is_some() {
+            // Filtered to nothing this round: bump the cursor to the table's max
+            // so we don't rescan the same non-matching rows every wakeup.
+            let max: Option<i64> = self
+                .client
+                .query_opt("SELECT max(seq) FROM fs_event", &[])
+                .await
+                .map_err(|e| AfsError::Metadata(e.to_string()))?
+                .and_then(|row| row.get(0));
+            if let Some(m) = max {
+                self.cursor = m.max(self.cursor);
+            }
+        }
+        Ok(events)
+    }
+}
+
+/// Decode a `fs_event` row (columns: seq, actor_id, session_id, kind, path,
+/// detail, ts, branch) into an [`Event`].
+fn row_to_event(r: &Row) -> Event {
+    Event {
+        seq: r.get(0),
+        actor_id: r.get(1),
+        session_id: r.get(2),
+        kind: r.get(3),
+        path: r.get(4),
+        detail: r.get(5),
+        ts: r.get(6),
+        branch: r.get(7),
     }
 }
 
@@ -586,9 +733,17 @@ impl MetadataStore for PostgresMetadataStore {
         let c = self.client().await?;
         let row = c
             .query_one(
-                "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts)
-                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING seq",
-                &[&ev.actor_id, &ev.session_id, &ev.kind, &ev.path, &ev.detail, &ts],
+                "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts, branch)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING seq",
+                &[
+                    &ev.actor_id,
+                    &ev.session_id,
+                    &ev.kind,
+                    &ev.path,
+                    &ev.detail,
+                    &ts,
+                    &ev.branch,
+                ],
             )
             .await?;
         let seq: i64 = row.get(0);
@@ -604,23 +759,12 @@ impl MetadataStore for PostgresMetadataStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT seq, actor_id, session_id, kind, path, detail, ts FROM fs_event
+                "SELECT seq, actor_id, session_id, kind, path, detail, ts, branch FROM fs_event
                  WHERE seq > $1 ORDER BY seq LIMIT $2",
                 &[&after_seq, &limit],
             )
             .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| Event {
-                seq: r.get(0),
-                actor_id: r.get(1),
-                session_id: r.get(2),
-                kind: r.get(3),
-                path: r.get(4),
-                detail: r.get(5),
-                ts: r.get(6),
-            })
-            .collect())
+        Ok(rows.iter().map(row_to_event).collect())
     }
 
     async fn touch_presence(

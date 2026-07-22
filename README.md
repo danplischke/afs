@@ -29,7 +29,8 @@ store, the working-tree engine, an SDK, and a CLI.
 | **FUSE** | Mount the workspace as a POSIX filesystem (real read/write mount) | ✅ done |
 | **MCP** | Serve the workspace to agents over MCP (JSON-RPC/stdio); writes attributed | ✅ done |
 | **M9 · GC** | Mark-and-sweep garbage collection: reclaim content no ref or live file references | ✅ done |
-| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, rest of hardening (encryption, benchmarks, agentfs import) | ⬜ |
+| **M9 · Import** | Import a `tursodatabase/agentfs` SQLite DB (tree + audit) with agent attribution | ✅ done |
+| M7–M9 | more surfaces (NFS/API), `git-remote-afs` helper, live collaboration, rest of hardening (encryption, benchmarks) | ⬜ |
 
 ## Layout
 
@@ -42,6 +43,7 @@ crates/
   afs-fuse/     # mount the workspace as a POSIX filesystem via FUSE
   afs-mcp/      # serve the workspace to agents over the Model Context Protocol
   afs-git/      # export/import genuine git objects — drive afs with the real `git`
+  afs-agentfs/  # import a tursodatabase/agentfs SQLite database into a workspace
 docs/DESIGN.md
 ```
 
@@ -100,6 +102,19 @@ afs --workspace "$WS" gc     # kept N object(s), deleted M (… bytes freed)
 
 Run it when the workspace is idle — it is not safe to run concurrently with
 writers.
+
+### Coming from agentfs
+
+An existing [`tursodatabase/agentfs`](https://github.com/tursodatabase/agentfs)
+database imports directly — its files, directories, and symlinks become an afs
+working tree, and its `tool_calls` audit log folds into afs's own audit. By
+default the imported tree is attributed to a synthetic `agentfs` agent actor, so
+`afs blame` shows it as agent-authored:
+
+```bash
+afs --workspace "$WS" import-agentfs ./agent.db
+afs --workspace "$WS" blame /some/file     # agent:agentfs
+```
 
 ## Development
 

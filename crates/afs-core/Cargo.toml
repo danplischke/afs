@@ -18,7 +18,7 @@ object_store = { version = "0.12", features = ["aws"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 similar = "3.1.1"
 thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "time"] }
 tokio-postgres = "0.7"
 
 [dev-dependencies]

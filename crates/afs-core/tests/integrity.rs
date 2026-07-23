@@ -100,7 +100,7 @@ async fn verifying_store_passes_good_reads_through() {
 async fn verifying_store_over_encryption_roundtrips() {
     let dir = tempfile::tempdir().unwrap();
     let backend: Arc<dyn ContentStore> = Arc::new(LocalCasStore::open(dir.path()).await.unwrap());
-    let enc = Arc::new(EncryptedStore::from_passphrase(backend, "hunter2"));
+    let enc = Arc::new(EncryptedStore::from_passphrase(backend, "hunter2", b"test salt 16byte").unwrap());
     let v = VerifyingStore::new(enc);
     let h = v.put(b"secret plaintext").await.unwrap();
     assert_eq!(&v.get(&h).await.unwrap()[..], b"secret plaintext");

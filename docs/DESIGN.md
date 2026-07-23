@@ -142,7 +142,11 @@ insertion. We use **FastCDC** content-defined chunking so an edit only rewrites 
 - files `≤` one min-chunk (say `≤ 16 KB`) are stored **inline** as a single chunk (optionally in-DB) to avoid
   per-tiny-file object-store round-trips.
 - a file = an ordered **manifest** (`blob` object) of `(chunk_hash, offset, length)`. Large files never need to
-  be fully resident: range reads map an offset to the covering chunks; streaming writes append chunks.
+  be fully resident: **range reads** map an offset to the covering chunks, **streaming reads** (`read_stream` /
+  `read_to_writer`) pull one chunk at a time into a `Stream`/writer, and streaming writes append chunks — so
+  there is **no fixed file-size ceiling**. Whole-file `read`/`write` still buffer in memory by choice (like
+  `std::fs::read`); the VFS partial-write path bounds itself by what it can actually allocate (`try_reserve`),
+  not an arbitrary limit, so a hostile size fails cleanly instead of aborting the process.
 
 **Pluggable backends** behind one trait:
 

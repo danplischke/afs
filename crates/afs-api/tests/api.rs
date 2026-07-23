@@ -198,6 +198,31 @@ async fn missing_file_is_404_and_dir_read_is_400() {
 }
 
 #[tokio::test]
+async fn large_file_streams_back_intact() {
+    // A multi-chunk file (> MAX_CHUNK) round-trips over HTTP: the GET streams the
+    // body chunk-by-chunk (never buffering it whole server-side) and reassembles
+    // byte-for-byte. Deterministic pseudo-random bytes give real CDC boundaries.
+    let fx = fixture().await;
+    let app = &fx.app;
+
+    let mut content = Vec::with_capacity(600 * 1024);
+    let mut x: u64 = 0x1234_5678_9ABC_DEF0;
+    while content.len() < 600 * 1024 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        content.extend_from_slice(&x.to_le_bytes());
+    }
+
+    let (st, _) = send(app, put_as("/files/big.bin", T_HUMAN, &content)).await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (st, body) = send(app, get("/files/big.bin")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, content, "streamed body reassembles byte-for-byte");
+}
+
+#[tokio::test]
 async fn versioning_over_http() {
     let fx = fixture().await;
     let app = &fx.app;

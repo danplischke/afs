@@ -11,6 +11,8 @@ use crate::error::{AfsError, Result};
 use crate::metadata::{MetaTxn, MetadataStore};
 use crate::types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};
 use bytes::{Bytes, BytesMut};
+use futures::Stream;
+use futures::stream::{BoxStream, StreamExt};
 
 const DIR_MODE: u32 = 0o040755;
 const FILE_MODE: u32 = 0o100644;
@@ -29,6 +31,28 @@ pub(crate) fn validate_component(name: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// An owned [`Stream`] over a manifest's chunks, one `store.get` at a time. The
+/// store handle is moved into the stream state, so the stream is self-contained
+/// (`'static` when `S` is) and can outlive the [`Fs`] it came from — unlike
+/// [`Fs::content_stream`], which borrows. Powers [`Fs::read_stream_owned`].
+fn owned_chunk_stream<S: ContentStore + 'static>(
+    store: S,
+    manifest: Manifest,
+) -> impl Stream<Item = Result<Bytes>> + Send + 'static {
+    futures::stream::unfold(
+        Some((store, manifest.chunks.into_iter())),
+        |state| async move {
+            let (store, mut chunks) = state?;
+            let c = chunks.next()?;
+            match store.get(&c.hash).await {
+                Ok(bytes) => Some((Ok(bytes), Some((store, chunks)))),
+                // Surface the error once, then end the stream (state -> None).
+                Err(e) => Some((Err(e), None)),
+            }
+        },
+    )
 }
 
 /// A filesystem over a metadata store and a content store.
@@ -413,12 +437,13 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// reconstruct a specific version's bytes.
     pub(crate) async fn content_bytes(&self, mhash: &Hash) -> Result<Bytes> {
         let manifest = self.load_manifest(mhash).await?;
-        // Don't trust the manifest's declared sizes for the up-front allocation:
-        // even though `Manifest::decode` checks `size == Σ chunk.len`, a crafted
-        // manifest can still declare many oversized chunk lengths and drive a
-        // huge `with_capacity` that aborts the process. Reserve a bounded amount
-        // and let the buffer grow as real chunk bytes arrive, enforcing the true
-        // file-size ceiling on the accumulated bytes.
+        // This buffers the whole body in memory. That is fine for ordinary files,
+        // but a caller that must stay bounded on an arbitrarily large file should
+        // use [`Self::read_stream`] instead. We still refuse to *pre-allocate* from
+        // the manifest's declared size: even though `Manifest::decode` checks
+        // `size == Σ chunk.len`, a crafted manifest can declare many oversized
+        // chunk lengths, so we reserve a bounded amount up front and let the buffer
+        // grow as real chunk bytes arrive.
         const INITIAL_HINT: usize = 8 * 1024 * 1024;
         let hint = manifest
             .chunks
@@ -427,16 +452,99 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             .min(INITIAL_HINT);
         let mut buf = BytesMut::with_capacity(hint);
         for c in &manifest.chunks {
-            let chunk = self.content.get(&c.hash).await?;
-            if buf.len().saturating_add(chunk.len()) > crate::vfs::MAX_FILE_SIZE as usize {
-                return Err(AfsError::TooLarge(format!(
-                    "file body exceeds {} bytes",
-                    crate::vfs::MAX_FILE_SIZE
-                )));
-            }
-            buf.extend_from_slice(&chunk);
+            buf.extend_from_slice(&self.content.get(&c.hash).await?);
         }
         Ok(buf.freeze())
+    }
+
+    /// Resolve `path` for streaming: check it is a regular file and return its
+    /// manifest (`None` if the file has no content, i.e. is empty). The manifest
+    /// is loaded eagerly so its errors surface before any chunk is streamed.
+    async fn open_for_stream(&self, path: &str) -> Result<Option<Manifest>> {
+        let ino = self.resolve(path).await?;
+        let inode = self
+            .meta
+            .get_inode(ino)
+            .await?
+            .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
+        match inode.kind {
+            FileKind::Dir => return Err(AfsError::IsADirectory(path.to_string())),
+            FileKind::Symlink => {
+                return Err(AfsError::InvalidArgument(format!("{path} is a symlink")));
+            }
+            FileKind::File => {}
+        }
+        match inode.content {
+            None => Ok(None),
+            Some(mhash) => Ok(Some(self.load_manifest(&mhash).await?)),
+        }
+    }
+
+    /// Stream a file's body chunk-by-chunk, fetching one chunk at a time so an
+    /// arbitrarily large file never has to be fully resident. Prefer this over
+    /// [`Self::read`] whenever a file may be larger than you want to hold in
+    /// memory (there is no fixed size ceiling on afs files).
+    ///
+    /// The stream yields the body in order; a chunk that fails to fetch
+    /// (missing/corrupt) surfaces as an `Err` item, after which the stream ends.
+    /// An empty file, or one with no content, yields no items. The returned stream
+    /// borrows `self`; for one that can outlive this handle (e.g. moved into an
+    /// HTTP response body) use [`Self::read_stream_owned`].
+    pub async fn read_stream(&self, path: &str) -> Result<BoxStream<'_, Result<Bytes>>> {
+        match self.open_for_stream(path).await? {
+            None => Ok(futures::stream::empty::<Result<Bytes>>().boxed()),
+            Some(manifest) => Ok(self.content_stream(manifest).boxed()),
+        }
+    }
+
+    /// A borrowed [`Stream`] over a manifest's chunks, one `content.get` at a
+    /// time. Borrows `self`, so the stream cannot outlive this handle.
+    fn content_stream(&self, manifest: Manifest) -> impl Stream<Item = Result<Bytes>> + Send + '_ {
+        futures::stream::unfold(
+            Some((&self.content, manifest.chunks.into_iter())),
+            |state| async move {
+                let (content, mut chunks) = state?;
+                let c = chunks.next()?;
+                match content.get(&c.hash).await {
+                    Ok(bytes) => Some((Ok(bytes), Some((content, chunks)))),
+                    // Surface the error once, then end the stream (state -> None).
+                    Err(e) => Some((Err(e), None)),
+                }
+            },
+        )
+    }
+
+    /// Like [`Self::read_stream`] but the returned stream owns its content handle,
+    /// so it is `'static` and can be moved into a spawned task or a response body
+    /// that outlives this borrow. Requires a cloneable content store — every real
+    /// backend is `Arc`-based, so this holds in practice.
+    pub async fn read_stream_owned(&self, path: &str) -> Result<BoxStream<'static, Result<Bytes>>>
+    where
+        C: Clone + 'static,
+    {
+        match self.open_for_stream(path).await? {
+            None => Ok(futures::stream::empty::<Result<Bytes>>().boxed()),
+            Some(manifest) => Ok(owned_chunk_stream(self.content.clone(), manifest).boxed()),
+        }
+    }
+
+    /// Stream a file's body into an async writer without ever materializing it
+    /// whole; returns the number of bytes written. The memory-bounded way to copy
+    /// a large file out — to a socket, a temp file, or an HTTP response body.
+    pub async fn read_to_writer<W>(&self, path: &str, mut writer: W) -> Result<u64>
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send,
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = self.read_stream(path).await?;
+        let mut total: u64 = 0;
+        while let Some(item) = stream.next().await {
+            let bytes = item?;
+            writer.write_all(&bytes).await?;
+            total += bytes.len() as u64;
+        }
+        writer.flush().await?;
+        Ok(total)
     }
 
     /// Read the byte range `[off, off + len)` of a file, fetching only the chunks

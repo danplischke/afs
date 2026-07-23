@@ -22,7 +22,7 @@
 
 use afs_sdk::{Workspace, WriteCtx};
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{FromRef, FromRequestParts, Path, Query, Request, State},
     http::{request::Parts, HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -296,8 +296,16 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
 }
 
-async fn read_file(State(ws): State<Shared>, Path(path): Path<String>) -> ApiResult<Vec<u8>> {
-    Ok(ws.read(&abspath(&path)).await?.to_vec())
+async fn read_file(State(ws): State<Shared>, Path(path): Path<String>) -> ApiResult<Response> {
+    // Stream the body so an arbitrarily large file is never buffered server-side.
+    // `read_stream` resolves and validates first, so a missing file (or a
+    // directory) is still a clean error here, before any bytes are streamed.
+    let stream = ws.read_stream(&abspath(&path)).await?;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        Body::from_stream(stream),
+    )
+        .into_response())
 }
 
 async fn write_file(

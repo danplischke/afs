@@ -573,6 +573,20 @@ impl MetadataStore for PostgresMetadataStore {
         Ok(())
     }
 
+    async fn bump_counter(&self, key: &str) -> Result<i64> {
+        let c = self.client().await?;
+        // One atomic upsert: create at 1, else increment the stored integer.
+        let row = c
+            .query_one(
+                "INSERT INTO config(key, value) VALUES ($1, '1')
+                 ON CONFLICT (key) DO UPDATE SET value = (config.value::bigint + 1)::text
+                 RETURNING value::bigint",
+                &[&key],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
     async fn truncate_tree(&self) -> Result<()> {
         let c = self.client().await?;
         // Blame is keyed by content hash (blob_blame), not by inode, so it is

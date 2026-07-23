@@ -78,16 +78,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// hash is then recorded in `config` so GC keeps exactly it and reaps
     /// superseded snapshots.
     pub(crate) async fn mirror_refs(&self) -> Result<()> {
-        let generation = self
-            .meta
-            .get_config(REFS_MIRROR_GEN)
-            .await?
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0)
-            + 1;
-        self.meta
-            .set_config(REFS_MIRROR_GEN, &generation.to_string())
-            .await?;
+        // Atomic increment: concurrent ref-advancing operations each get a
+        // distinct, strictly increasing generation, so a recovery scan can pick
+        // the newest snapshot unambiguously — no read-then-write race (audit #21).
+        let generation = self.meta.bump_counter(REFS_MIRROR_GEN).await? as u64;
         let refs = self.meta.list_refs().await?;
         let hash = self
             .content

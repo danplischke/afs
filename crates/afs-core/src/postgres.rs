@@ -1120,6 +1120,17 @@ impl MetaTxn for PostgresTxn {
         Ok(row.get(0))
     }
 
+    async fn truncate_tree(&mut self) -> Result<()> {
+        // Same as MetadataStore::truncate_tree, staged in this transaction.
+        self.conn()
+            .batch_execute(
+                "DELETE FROM dentry; DELETE FROM symlink;
+                 DELETE FROM inode WHERE ino <> 1;",
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn commit(mut self: Box<Self>) -> Result<()> {
         let obj = self.obj.take().expect("transaction already finished");
         obj.batch_execute("COMMIT").await?;

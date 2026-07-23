@@ -921,6 +921,15 @@ impl MetaTxn for SqliteTxn {
         Ok(conn.last_insert_rowid())
     }
 
+    async fn truncate_tree(&mut self) -> Result<()> {
+        // Same as MetadataStore::truncate_tree, staged in this transaction.
+        self.conn().execute_batch(
+            "DELETE FROM dentry; DELETE FROM symlink;
+             DELETE FROM inode WHERE ino <> 1;",
+        )?;
+        Ok(())
+    }
+
     async fn commit(mut self: Box<Self>) -> Result<()> {
         let guard = self.guard.take().expect("transaction already finished");
         guard.execute_batch("COMMIT")?;

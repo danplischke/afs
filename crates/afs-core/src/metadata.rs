@@ -219,6 +219,12 @@ pub trait MetaTxn: Send {
     async fn set_blob_blame(&mut self, content: &Hash, runs: &str) -> Result<()>;
     /// Append an op-log entry, returning its id.
     async fn append_edit_op(&mut self, op: EditOpInit) -> Result<i64>;
+    /// Delete the whole working tree (every inode except the root, and all
+    /// dentries/symlinks) as part of this transaction — so a `truncate` +
+    /// rematerialize (checkout/merge/rebuild) commits atomically and a failure or
+    /// concurrent reader never sees a half-emptied tree. Blame (keyed by content
+    /// hash) is deliberately not cleared.
+    async fn truncate_tree(&mut self) -> Result<()>;
     /// Commit every staged mutation atomically. Consumes the transaction.
     async fn commit(self: Box<Self>) -> Result<()>;
 }

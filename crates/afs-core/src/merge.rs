@@ -14,7 +14,7 @@ use crate::engine::Fs;
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::objectgraph::{Commit, Tree, TreeEntry, TreeKind};
-use crate::types::{Hash, INO_ROOT};
+use crate::types::Hash;
 use crate::util::now_secs;
 use async_recursion::async_recursion;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -156,8 +156,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                     "branch {branch} moved concurrently; retry the merge"
                 )));
             }
-            self.meta.truncate_tree().await?;
-            self.materialize_into(theirs_commit.tree, INO_ROOT).await?;
+            self.replace_working_tree(theirs_commit.tree).await?;
             self.mirror_refs().await?;
             return Ok(MergeOutcome::FastForward(theirs));
         }
@@ -202,15 +201,13 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                     "branch {branch} moved concurrently; retry the merge"
                 )));
             }
-            self.meta.truncate_tree().await?;
-            self.materialize_into(merged_tree, INO_ROOT).await?;
+            self.replace_working_tree(merged_tree).await?;
             self.mirror_refs().await?;
             Ok(MergeOutcome::Merged(commit_hash))
         } else {
             // Conflicts: reflect the merge (with markers) and record MERGE_HEAD;
             // the ref intentionally does NOT advance until the user commits.
-            self.meta.truncate_tree().await?;
-            self.materialize_into(merged_tree, INO_ROOT).await?;
+            self.replace_working_tree(merged_tree).await?;
             self.meta.clear_conflicts().await?;
             for c in &conflicts {
                 self.meta.set_conflict(&c.path, &c.kind).await?;

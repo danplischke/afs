@@ -55,16 +55,23 @@ impl Workspace {
     }
 
     /// SQLite metadata + a local content store **encrypted at rest** with a key
-    /// derived from `passphrase`. The same passphrase must be used on reopen;
-    /// the wrong one fails loudly rather than returning garbage.
+    /// derived from `passphrase` (Argon2id) and a per-store random salt kept in
+    /// `cas_dir/keysalt`. The same passphrase must be used on reopen; the wrong
+    /// one fails loudly rather than returning garbage. The salt is created on
+    /// first open and is not secret, but it must persist — it lives beside the
+    /// content store so it survives a metadata-DB loss (recovery-safe).
     pub async fn open_local_encrypted(
         db_path: impl AsRef<Path>,
         cas_dir: impl AsRef<Path>,
         passphrase: &str,
     ) -> Result<Self> {
+        let cas_dir = cas_dir.as_ref();
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        // Open the CAS first so the directory exists, then place the salt in it.
         let backend: Content = Arc::new(LocalCasStore::open(cas_dir).await?);
-        let content: Content = Arc::new(EncryptedStore::from_passphrase(backend, passphrase));
+        let salt = read_or_create_salt(cas_dir).await?;
+        let content: Content =
+            Arc::new(EncryptedStore::from_passphrase(backend, passphrase, &salt)?);
         Self::open(meta, content).await
     }
 
@@ -604,5 +611,57 @@ impl Workspace {
     /// window. Returns the number of rows reaped.
     pub async fn reap_presence(&self, grace_secs: i64) -> Result<u64> {
         self.fs.reap_presence(grace_secs).await
+    }
+}
+
+/// Read the per-store encryption salt from `cas_dir/keysalt`, creating it with 16
+/// fresh random bytes on first open.
+///
+/// The salt is not secret, but the Argon2id key is derived from
+/// `passphrase + salt`, so it must stay stable for the life of the store and must
+/// survive a metadata-DB loss — hence it lives beside the content store, not in
+/// the DB. It is written with an exclusive `create_new`, so two processes opening
+/// the same fresh store concurrently can't settle on different salts: exactly one
+/// wins the create and the other re-reads the winner's file.
+async fn read_or_create_salt(cas_dir: &Path) -> Result<Vec<u8>> {
+    use tokio::io::AsyncWriteExt;
+    let path = cas_dir.join("keysalt");
+    match tokio::fs::read(&path).await {
+        Ok(salt) if !salt.is_empty() => return Ok(salt),
+        Ok(_) => {
+            return Err(AfsError::Content(format!(
+                "encryption salt {} is empty (refusing to derive a key from it)",
+                path.display()
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let mut salt = [0u8; 16];
+    getrandom::getrandom(&mut salt)
+        .map_err(|e| AfsError::Content(format!("failed to generate encryption salt: {e}")))?;
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+    {
+        Ok(mut f) => {
+            f.write_all(&salt).await?;
+            f.flush().await?;
+            Ok(salt.to_vec())
+        }
+        // Lost the create race with a concurrent open: adopt the salt they wrote.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let salt = tokio::fs::read(&path).await?;
+            if salt.is_empty() {
+                return Err(AfsError::Content(format!(
+                    "encryption salt {} is empty (refusing to derive a key from it)",
+                    path.display()
+                )));
+            }
+            Ok(salt)
+        }
+        Err(e) => Err(e.into()),
     }
 }

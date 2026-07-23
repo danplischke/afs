@@ -5,7 +5,7 @@
 //! server pre-provisioned, so attribution is derived from the verified identity —
 //! never from the request. Reads are open.
 
-use afs_api::{router, BearerAuth};
+use afs_api::{router, router_with, ApiOptions, BearerAuth};
 use afs_sdk::Workspace;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -63,6 +63,14 @@ fn as_json(bytes: &[u8]) -> Value {
 
 fn get(uri: &str) -> Request<Body> {
     Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+fn get_as(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
 }
 
 // --- unauthenticated mutation builders (for negative tests) -----------------
@@ -343,4 +351,32 @@ async fn unauthenticated_and_forged_mutations_are_rejected() {
     let blame = as_json(&body);
     assert_eq!(blame[0]["actor"], "dan", "attribution must follow the token, not ?actor=");
     assert_eq!(blame[0]["kind"], "human");
+}
+
+// SEC (security audit #8): reads are open by default, but `gate_reads` requires a
+// credential for reads too — closing the full-disclosure surface for operators
+// who want it. /health stays open regardless.
+#[tokio::test]
+async fn gate_reads_requires_a_credential_for_reads() {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ws = Workspace::open_local(dir.path().join("meta.db"), dir.path().join("cas"))
+        .await
+        .unwrap();
+    let human = ws.create_human("dan", None).await.unwrap();
+    let auth = BearerAuth::new().with_token(T_HUMAN, human, None);
+    let app = router_with(Arc::new(ws), Arc::new(auth), ApiOptions { gate_reads: true });
+
+    // /health stays open even when reads are gated.
+    let (st, _) = send(&app, get("/health")).await;
+    assert_eq!(st, StatusCode::OK);
+
+    // a read without a credential is now rejected...
+    let (st, _) = send(&app, get("/log")).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = send(&app, get("/files/anything.txt")).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // ...but works with a valid token.
+    let (st, _) = send(&app, get_as("/log", T_HUMAN)).await;
+    assert_eq!(st, StatusCode::OK);
 }

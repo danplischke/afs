@@ -800,6 +800,16 @@ async fn main() -> Result<()> {
             afs_api::serve(std::sync::Arc::new(ws), addr, auth).await?;
         }
         Cmd::Nfs { addr } => {
+            // NFSv3 is unauthenticated; warn loudly if this isn't a loopback bind.
+            if addr
+                .parse::<std::net::SocketAddr>()
+                .map(|s| !s.ip().is_loopback())
+                .unwrap_or(false)
+            {
+                eprintln!(
+                    "warning: binding NFS to a non-loopback address ({addr}); NFSv3 has no authentication — anyone who can reach it gets full, unattributed access. Prefer a loopback bind reached over a tunnel/VPN."
+                );
+            }
             println!(
                 "serving afs over NFSv3 at {addr}\n  mount with: mount -t nfs -o vers=3,tcp,port=<port>,mountport=<port>,nolock <host>:/ /mnt"
             );

@@ -40,6 +40,13 @@ impl AfsNfs {
 
 /// Bind an NFSv3 server for `ws` at `addr` (e.g. `127.0.0.1:11111`) and serve
 /// until the process exits.
+///
+/// # Security
+///
+/// NFSv3 has no meaningful authentication — anyone who can reach `addr` gets full
+/// access to the workspace, and its writes are unattributed. Bind a **loopback**
+/// address (the default) and reach it over an SSH tunnel / VPN, or otherwise keep
+/// it behind a network boundary; never expose it on an untrusted network.
 pub async fn serve(ws: Workspace, addr: &str) -> std::io::Result<()> {
     let listener = NFSTcpListener::bind(addr, AfsNfs::new(ws)).await?;
     listener.handle_forever().await

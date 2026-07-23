@@ -239,3 +239,41 @@ async fn concurrent_merges_never_orphan_a_success() {
     // and the surviving history is well-formed: both changes are reachable.
     assert!(fs.is_ancestor(feat, head.unwrap()).await.unwrap());
 }
+
+// SEC (security audit #9): checkout/merge/rebuild replace the working tree in one
+// transaction, so a rematerialize that fails partway — here, a commit whose tree
+// references an object missing from the content store — rolls back and leaves the
+// previous working tree intact, never half-emptied.
+#[tokio::test]
+async fn checkout_rolls_back_and_keeps_the_tree_on_a_missing_object() {
+    use afs_core::{Commit, ContentStore, Tree, TreeEntry, TreeKind};
+    let fs = fixture().await;
+    fs.write("/keep.txt", b"hello").await.unwrap();
+    fs.commit("dan", "base").await.unwrap();
+
+    // A branch whose commit tree references a file manifest that was never stored.
+    let missing = Hash::of(b"a manifest that was never stored");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: "bad.txt".to_string(),
+            mode: 0o100644,
+            kind: TreeKind::File,
+            hash: missing,
+        }],
+    };
+    let tree_hash = fs.content.put(&tree.encode()).await.unwrap();
+    let commit = Commit {
+        tree: tree_hash,
+        parents: vec![],
+        author: "x".to_string(),
+        message: "broken".to_string(),
+        timestamp: 0,
+    };
+    let commit_hash = fs.content.put(&commit.encode()).await.unwrap();
+    fs.meta.set_ref("broken", &commit_hash.to_hex()).await.unwrap();
+
+    // Checkout fails when materialize hits the missing object...
+    assert!(fs.checkout("broken").await.is_err());
+    // ...and the previous working tree survived intact (the transaction rolled back).
+    assert_eq!(&fs.read("/keep.txt").await.unwrap()[..], b"hello");
+}

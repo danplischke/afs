@@ -11,7 +11,7 @@ use crate::chunk::Manifest;
 use crate::content::ContentStore;
 use crate::engine::Fs;
 use crate::error::{AfsError, Result};
-use crate::metadata::MetadataStore;
+use crate::metadata::{MetaTxn, MetadataStore};
 use crate::objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, RefSnapshot, Tree, TreeEntry, TreeKind,
     VersioningMode,
@@ -266,45 +266,60 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             Hash::from_hex(&value).ok_or_else(|| AfsError::Metadata("bad ref value".into()))?;
         let commit = Commit::decode(&self.content.get(&commit_hash).await?)?;
 
-        self.meta.truncate_tree().await?;
-        self.materialize_into(commit.tree, INO_ROOT).await?;
+        self.replace_working_tree(commit.tree).await?;
         self.meta.set_ref(HEAD, &format!("ref:{branch}")).await?;
         self.mirror_refs().await?;
         Ok(())
     }
 
-    /// Materialize a tree's entries as children of `parent_ino`.
+    /// Atomically replace the working tree with the contents of `tree_hash`:
+    /// truncate the current tree and rematerialize the new one inside a single
+    /// metadata transaction, so a failure mid-materialize — or a concurrent
+    /// reader — never observes a half-emptied tree (audit #9). Used by checkout,
+    /// merge, and rebuild.
+    pub(crate) async fn replace_working_tree(&self, tree_hash: Hash) -> Result<()> {
+        let mut txn = self.meta.begin().await?;
+        txn.truncate_tree().await?;
+        self.materialize_into_txn(&mut *txn, tree_hash, INO_ROOT).await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Materialize a tree's entries as children of `parent_ino`, staging every
+    /// inode/dentry in `txn` so the whole subtree commits atomically.
     #[async_recursion]
-    pub(crate) async fn materialize_into(&self, tree_hash: Hash, parent_ino: Ino) -> Result<()> {
+    async fn materialize_into_txn(
+        &self,
+        txn: &mut dyn MetaTxn,
+        tree_hash: Hash,
+        parent_ino: Ino,
+    ) -> Result<()> {
         let tree = Tree::decode(&self.content.get(&tree_hash).await?)?;
         for e in &tree.entries {
             match e.kind {
                 TreeKind::Dir => {
-                    let ino = self
-                        .meta
+                    let ino = txn
                         .create_inode(InodeInit {
                             kind: FileKind::Dir,
                             mode: e.mode,
                         })
                         .await?;
-                    self.meta.add_dentry(parent_ino, &e.name, ino).await?;
-                    self.materialize_into(e.hash, ino).await?;
+                    txn.add_dentry(parent_ino, &e.name, ino).await?;
+                    self.materialize_into_txn(&mut *txn, e.hash, ino).await?;
                 }
                 TreeKind::File => {
-                    let ino = self
-                        .meta
+                    let ino = txn
                         .create_inode(InodeInit {
                             kind: FileKind::File,
                             mode: e.mode,
                         })
                         .await?;
                     let size = Manifest::decode(&self.content.get(&e.hash).await?)?.size;
-                    self.meta.set_content(ino, Some(e.hash), size).await?;
-                    self.meta.add_dentry(parent_ino, &e.name, ino).await?;
+                    txn.set_content(ino, Some(e.hash), size).await?;
+                    txn.add_dentry(parent_ino, &e.name, ino).await?;
                 }
                 TreeKind::Symlink => {
-                    let ino = self
-                        .meta
+                    let ino = txn
                         .create_inode(InodeInit {
                             kind: FileKind::Symlink,
                             mode: e.mode,
@@ -312,8 +327,8 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                         .await?;
                     let target =
                         String::from_utf8_lossy(&self.content.get(&e.hash).await?).into_owned();
-                    self.meta.set_symlink(ino, &target).await?;
-                    self.meta.add_dentry(parent_ino, &e.name, ino).await?;
+                    txn.set_symlink(ino, &target).await?;
+                    txn.add_dentry(parent_ino, &e.name, ino).await?;
                 }
             }
         }

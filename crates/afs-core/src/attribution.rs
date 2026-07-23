@@ -1,22 +1,28 @@
 //! Attribution & provenance (`docs/DESIGN.md` §4d): who edited which lines.
 //!
 //! Every attributed write ([`Fs::write_as`]) records an append-only [`EditOp`]
-//! (the durable ground truth, linked to an actor/session/tool-call) and updates a
-//! line-level authorship map for the file. [`Fs::blame`] then reports, per line
-//! range, whether a **human** or **agent** wrote it — so a shared human+agent
-//! workspace can always tell who did what.
+//! (the durable ground truth, linked to an actor/session/tool-call) and stores a
+//! line-level authorship map. [`Fs::blame`] then reports, per line range, whether
+//! a **human** or **agent** wrote it — so a shared human+agent workspace can
+//! always tell who did what.
 //!
-//! M6 scope: live working-tree blame (survives commits; reset by checkout/merge).
-//! Persisting blame per blob-version in the object graph — so it survives
-//! merge/rebase — is a noted follow-up.
+//! Blame is keyed by **content version** — a blob's manifest hash — not by inode
+//! (M9). Because the map travels with the bytes it describes, blame survives
+//! checkout (the tree is rebuilt, but each inode points back at the same content)
+//! and can never desync from the file it annotates: a version with no recorded
+//! authorship — e.g. one produced by a plain, non-attributed [`Fs::write`] —
+//! simply blames to nothing rather than showing a previous version's runs (H7).
+//! Attribution is also move- and whitespace-aware, so a re-indent or a reorder
+//! keeps a line's original author instead of crediting the reformatter (M10).
 
 use crate::content::ContentStore;
 use crate::engine::Fs;
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
-use crate::types::{FileKind, Ino};
+use crate::types::Ino;
 use crate::util::now_secs;
-use similar::{DiffOp, TextDiff};
+use similar::{ChangeTag, TextDiff};
+use std::collections::{HashMap, VecDeque};
 
 /// Whether an actor is a person, an autonomous agent, or the system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,8 +311,13 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                     Some(h) => self.read_body(&h).await?,
                     None => Vec::new(),
                 };
-                let authors = match self.meta.get_line_blame(ino).await? {
-                    Some(s) => BlameMap::decode(&s).per_line(),
+                // Prior authorship comes from the *content* the inode points at,
+                // so it survives checkout/merge and never desyncs (M9).
+                let authors = match &pre {
+                    Some(h) => match self.meta.get_blob_blame(h).await? {
+                        Some(s) => BlameMap::decode(&s).per_line(),
+                        None => Vec::new(),
+                    },
                     None => Vec::new(),
                 };
                 (pre, bytes, authors)
@@ -334,7 +345,11 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             Some(ino) => ino,
             None => Self::create_file_in(tx.as_mut(), parent, name).await?,
         };
-        tx.set_line_blame(ino, &blame.encode()).await?;
+        // Blame is keyed by the new content version (its manifest hash); an empty
+        // file has no content and no blame.
+        if let Some(h) = mhash {
+            tx.set_blob_blame(&h, &blame.encode()).await?;
+        }
         tx.set_content(ino, mhash, size).await?;
         tx.append_edit_op(EditOpInit {
             session_id: ctx.session,
@@ -359,7 +374,17 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Per-line-range authorship for `path`, distinguishing human vs agent.
     pub async fn blame(&self, path: &str) -> Result<Vec<BlameRange>> {
         let ino = self.resolve(path).await?;
-        let map = match self.meta.get_line_blame(ino).await? {
+        // Blame lives with the content version the inode points at (M9); an empty
+        // file, or content with no recorded authorship, blames to nothing.
+        let inode = self
+            .meta
+            .get_inode(ino)
+            .await?
+            .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
+        let Some(content) = inode.content else {
+            return Ok(Vec::new());
+        };
+        let map = match self.meta.get_blob_blame(&content).await? {
             Some(s) => BlameMap::decode(&s),
             None => return Ok(Vec::new()),
         };
@@ -402,12 +427,21 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
         let mut changed = 0;
         for (ino, path) in paths {
-            let Some(map_s) = self.meta.get_line_blame(ino).await? else {
+            // Blame and the current bytes both come from the content the inode
+            // points at (M9); an empty file, or content with no recorded blame,
+            // is skipped.
+            let Some(inode) = self.meta.get_inode(ino).await? else {
+                continue;
+            };
+            let Some(content_hash) = inode.content else {
+                continue;
+            };
+            let Some(map_s) = self.meta.get_blob_blame(&content_hash).await? else {
                 continue;
             };
             let authors = BlameMap::decode(&map_s).per_line();
             let Ok(current) =
-                std::str::from_utf8(&self.read_current(ino).await?).map(str::to_owned)
+                std::str::from_utf8(&self.read_body(&content_hash).await?).map(str::to_owned)
             else {
                 continue; // binary: skip line-revert
             };
@@ -436,8 +470,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             // atomically, keeping content and authorship in lockstep (C1).
             let mut tx = self.meta.begin().await?;
             tx.set_content(ino, mhash, size).await?;
-            tx.set_line_blame(ino, &BlameMap::from_per_line(&kept_authors).encode())
-                .await?;
+            if let Some(h) = mhash {
+                tx.set_blob_blame(&h, &BlameMap::from_per_line(&kept_authors).encode())
+                    .await?;
+            }
             tx.append_edit_op(EditOpInit {
                 session_id: None,
                 actor_id,
@@ -457,21 +493,6 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         }
         Ok(changed)
     }
-
-    async fn read_current(&self, ino: Ino) -> Result<Vec<u8>> {
-        let inode = self
-            .meta
-            .get_inode(ino)
-            .await?
-            .ok_or_else(|| AfsError::NotFound(format!("ino {ino}")))?;
-        if inode.kind != FileKind::File {
-            return Ok(Vec::new());
-        }
-        match inode.content {
-            Some(h) => self.read_body(&h).await,
-            None => Ok(Vec::new()),
-        }
-    }
 }
 
 /// Split text into lines the way `TextDiff::from_lines` tokenizes (keeping
@@ -480,8 +501,11 @@ fn split_lines(s: &str) -> Vec<&str> {
     s.split_inclusive('\n').collect()
 }
 
-/// Compute per-new-line authorship: unchanged lines keep their prior author;
-/// inserted/replaced lines are attributed to `new_author`.
+/// Compute per-new-line authorship. Unchanged lines keep their prior author. A
+/// line that only *moved* or was re-indented keeps its author too: its
+/// whitespace-normalized content is matched against the lines deleted in the
+/// same diff, so a reorder or a pure re-indent isn't credited to the current
+/// writer (M10). Genuinely new lines are attributed to `new_author`.
 fn diff_authors(
     old: &[u8],
     new: &[u8],
@@ -491,26 +515,50 @@ fn diff_authors(
     let old_s = std::str::from_utf8(old).unwrap_or("");
     let new_s = std::str::from_utf8(new).unwrap_or("");
     let diff = TextDiff::from_lines(old_s, new_s);
+
+    // Index the deleted lines by normalized content -> queue of their authors, so
+    // a matching inserted line (a move, or a whitespace-only change) reclaims the
+    // original author instead of being credited to the current writer.
+    let mut moved: HashMap<String, VecDeque<(i64, i64)>> = HashMap::new();
+    for change in diff.iter_all_changes() {
+        if change.tag() == ChangeTag::Delete
+            && let Some(i) = change.old_index()
+        {
+            let author = old_authors.get(i).copied().unwrap_or(new_author);
+            moved
+                .entry(normalize_line(change.value()))
+                .or_default()
+                .push_back(author);
+        }
+    }
+
     let mut out: Vec<(i64, i64)> = Vec::new();
-    for op in diff.ops() {
-        match *op {
-            DiffOp::Equal { old_index, len, .. } => {
-                for k in 0..len {
-                    out.push(
-                        old_authors
-                            .get(old_index + k)
-                            .copied()
-                            .unwrap_or(new_author),
-                    );
-                }
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                let author = change
+                    .old_index()
+                    .and_then(|i| old_authors.get(i).copied())
+                    .unwrap_or(new_author);
+                out.push(author);
             }
-            DiffOp::Insert { new_len, .. } | DiffOp::Replace { new_len, .. } => {
-                for _ in 0..new_len {
-                    out.push(new_author);
-                }
+            ChangeTag::Insert => {
+                // A moved / re-indented line reclaims its author; a genuinely new
+                // line belongs to the current writer.
+                let author = moved
+                    .get_mut(&normalize_line(change.value()))
+                    .and_then(|q| q.pop_front())
+                    .unwrap_or(new_author);
+                out.push(author);
             }
-            DiffOp::Delete { .. } => {}
+            ChangeTag::Delete => {}
         }
     }
     out
+}
+
+/// A line's content with surrounding whitespace (and its newline) stripped, so a
+/// re-indented line matches its original for move/whitespace-aware attribution.
+fn normalize_line(line: &str) -> String {
+    line.trim().to_string()
 }

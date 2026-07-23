@@ -389,8 +389,11 @@ impl MetadataStore for SqliteMetadataStore {
 
     async fn truncate_tree(&self) -> Result<()> {
         let conn = self.lock();
+        // Blame is keyed by content hash (blob_blame), not by inode, so it is
+        // deliberately *not* cleared here — the rematerialized tree points its
+        // inodes back at the same content and its blame comes with it.
         conn.execute_batch(
-            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM line_blame;
+            "DELETE FROM dentry; DELETE FROM symlink;
              DELETE FROM inode WHERE ino <> 1;",
         )?;
         Ok(())
@@ -597,21 +600,21 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(out)
     }
 
-    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()> {
+    async fn set_blob_blame(&self, content: &Hash, runs: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO line_blame(ino, runs) VALUES (?1, ?2)
-             ON CONFLICT(ino) DO UPDATE SET runs = excluded.runs",
-            params![ino, runs],
+            "INSERT INTO blob_blame(content_hash, runs) VALUES (?1, ?2)
+             ON CONFLICT(content_hash) DO UPDATE SET runs = excluded.runs",
+            params![content.to_hex(), runs],
         )?;
         Ok(())
     }
 
-    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>> {
+    async fn get_blob_blame(&self, content: &Hash) -> Result<Option<String>> {
         let conn = self.lock();
         conn.query_row(
-            "SELECT runs FROM line_blame WHERE ino = ?1",
-            params![ino],
+            "SELECT runs FROM blob_blame WHERE content_hash = ?1",
+            params![content.to_hex()],
             |r| r.get::<_, String>(0),
         )
         .optional()
@@ -865,11 +868,11 @@ impl MetaTxn for SqliteTxn {
         Ok(())
     }
 
-    async fn set_line_blame(&mut self, ino: Ino, runs: &str) -> Result<()> {
+    async fn set_blob_blame(&mut self, content: &Hash, runs: &str) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO line_blame(ino, runs) VALUES (?1, ?2)
-             ON CONFLICT(ino) DO UPDATE SET runs = excluded.runs",
-            params![ino, runs],
+            "INSERT INTO blob_blame(content_hash, runs) VALUES (?1, ?2)
+             ON CONFLICT(content_hash) DO UPDATE SET runs = excluded.runs",
+            params![content.to_hex(), runs],
         )?;
         Ok(())
     }

@@ -23,6 +23,7 @@ name = "afs-api"
 version = "0.0.0"
 dependencies = [
  "afs-sdk",
+ "async-trait",
  "axum",
  "http-body-util",
  "serde",

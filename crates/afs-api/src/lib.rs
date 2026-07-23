@@ -6,6 +6,16 @@
 //! goes through [`afs_sdk::Workspace`], so writes are recorded on the change feed
 //! and attributed exactly as they are everywhere else.
 //!
+//! **Authentication.** Every mutating route requires an authenticated
+//! [`Principal`], resolved from the request by an [`Authenticator`] you supply to
+//! [`router`]/[`serve`]. The actor a write is attributed to comes from that
+//! verified identity, never from a request field, so a client cannot forge
+//! attribution or mint identities anonymously. [`BearerAuth`] is a ready-made
+//! `Authorization: Bearer` token→actor map; implement [`Authenticator`] for
+//! anything dynamic (JWT, a session DB). Reads are open by default — gate them at
+//! your proxy or a wrapping layer if you need to. This mirrors the Python
+//! `afs.fastapi.build_router` model.
+//!
 //! Files are transferred as raw bytes (`application/octet-stream`); everything
 //! else is JSON. Paths are the URL tail after the resource segment, e.g.
 //! `GET /files/notes/todo.txt` reads `/notes/todo.txt`.
@@ -13,21 +23,139 @@
 use afs_sdk::{Workspace, WriteCtx};
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{FromRef, FromRequestParts, Path, Query, State},
+    http::{request::Parts, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 type Shared = Arc<Workspace>;
 
-/// Build the router for a workspace.
-pub fn router(ws: Shared) -> Router {
+// --- authentication ---------------------------------------------------------
+
+/// The authenticated identity behind a request: the afs actor a mutation is
+/// attributed to, plus an optional session. afs never trusts a client-named
+/// actor — this is always resolved by an [`Authenticator`], never read from the
+/// request body or query string.
+#[derive(Clone, Copy, Debug)]
+pub struct Principal {
+    pub actor: i64,
+    pub session: Option<i64>,
+}
+
+impl Principal {
+    fn write_ctx(&self) -> WriteCtx {
+        match self.session {
+            Some(s) => WriteCtx::session(self.actor, s),
+            None => WriteCtx::actor(self.actor),
+        }
+    }
+}
+
+/// Resolves a request's credentials to a [`Principal`]. The embedder owns
+/// identity: decode your bearer token / session cookie / mTLS identity here and
+/// map it to the afs actor it should be attributed to. Return `None` to reject
+/// the request with `401`. This is the Rust counterpart to the `authn`
+/// dependency of the Python `afs.fastapi.build_router`.
+#[async_trait::async_trait]
+pub trait Authenticator: Send + Sync + 'static {
+    async fn authenticate(&self, headers: &HeaderMap) -> Option<Principal>;
+}
+
+/// A static `Authorization: Bearer <token>` → actor map. A reasonable default
+/// when tokens are minted out of band; for anything dynamic (JWT, a session DB)
+/// implement [`Authenticator`] yourself.
+#[derive(Clone, Default)]
+pub struct BearerAuth {
+    tokens: HashMap<String, Principal>,
+}
+
+impl BearerAuth {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Map a bearer token to an actor (and optional session).
+    pub fn with_token(mut self, token: impl Into<String>, actor: i64, session: Option<i64>) -> Self {
+        self.tokens.insert(token.into(), Principal { actor, session });
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+}
+
+#[async_trait::async_trait]
+impl Authenticator for BearerAuth {
+    async fn authenticate(&self, headers: &HeaderMap) -> Option<Principal> {
+        let token = headers
+            .get(axum::http::header::AUTHORIZATION)?
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")?
+            .trim();
+        self.tokens.get(token).copied()
+    }
+}
+
+/// Attributes **every** request to one fixed principal with no credential check.
+/// For local single-user dev only — the CLI uses it when `afs serve` runs on a
+/// loopback address with no tokens configured. Never expose it publicly.
+pub struct LocalDevAuth(pub Principal);
+
+#[async_trait::async_trait]
+impl Authenticator for LocalDevAuth {
+    async fn authenticate(&self, _headers: &HeaderMap) -> Option<Principal> {
+        Some(self.0)
+    }
+}
+
+/// Router state: the workspace plus the authenticator. Handlers pull the
+/// workspace via `State<Arc<Workspace>>` and the identity via the [`Auth`]
+/// extractor, both through `FromRef`.
+#[derive(Clone)]
+struct AppState {
+    ws: Arc<Workspace>,
+    auth: Arc<dyn Authenticator>,
+}
+
+impl FromRef<AppState> for Shared {
+    fn from_ref(s: &AppState) -> Shared {
+        s.ws.clone()
+    }
+}
+
+/// The authenticated principal, extracted per request. Rejects with `401` when
+/// the [`Authenticator`] returns `None`, so every handler that takes it can only
+/// run for a verified identity.
+struct Auth(Principal);
+
+impl FromRequestParts<AppState> for Auth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        match state.auth.authenticate(&parts.headers).await {
+            Some(p) => Ok(Auth(p)),
+            None => Err(ApiError::status(
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated: a valid credential is required",
+            )),
+        }
+    }
+}
+
+/// Build the router for a workspace with the given authenticator. Every mutating
+/// route requires an authenticated [`Principal`] (resolved by `auth`); reads are
+/// open by default — gate them at your proxy or a wrapping layer if you need to.
+pub fn router(ws: Shared, auth: Arc<dyn Authenticator>) -> Router {
+    let state = AppState { ws, auth };
     Router::new()
         .route("/health", get(health))
         .route(
@@ -54,13 +182,17 @@ pub fn router(ws: Shared) -> Router {
         .route("/suggestions/{id}/reject", post(reject_suggestion))
         .route("/actors", post(create_actor))
         .route("/sessions", post(create_session))
-        .with_state(ws)
+        .with_state(state)
 }
 
 /// Serve the workspace over HTTP, blocking until the server stops.
-pub async fn serve(ws: Shared, addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve(
+    ws: Shared,
+    addr: SocketAddr,
+    auth: Arc<dyn Authenticator>,
+) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(ws)).await
+    axum::serve(listener, router(ws, auth)).await
 }
 
 /// Normalize a URL-tail path to an absolute afs path.
@@ -74,26 +206,42 @@ fn abspath(p: &str) -> String {
 
 // --- error mapping ----------------------------------------------------------
 
-/// Wraps an [`afs_sdk::AfsError`] with an HTTP status.
-struct ApiError(afs_sdk::AfsError);
+/// An HTTP error: either a mapped [`afs_sdk::AfsError`] or an explicit status
+/// (e.g. `401` from the [`Auth`] extractor).
+enum ApiError {
+    Afs(afs_sdk::AfsError),
+    Status(StatusCode, String),
+}
+
+impl ApiError {
+    fn status(code: StatusCode, msg: impl Into<String>) -> Self {
+        ApiError::Status(code, msg.into())
+    }
+}
 
 impl From<afs_sdk::AfsError> for ApiError {
     fn from(e: afs_sdk::AfsError) -> Self {
-        ApiError(e)
+        ApiError::Afs(e)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         use afs_sdk::AfsError::*;
-        let status = match self.0 {
-            NotFound(_) | ContentMissing(_) => StatusCode::NOT_FOUND,
-            AlreadyExists(_) | Conflict(_) => StatusCode::CONFLICT,
-            IsADirectory(_) | NotADirectory(_) | DirectoryNotEmpty(_) | InvalidPath(_)
-            | InvalidArgument(_) => StatusCode::BAD_REQUEST,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, message) = match self {
+            ApiError::Status(code, msg) => (code, msg),
+            ApiError::Afs(e) => {
+                let status = match e {
+                    NotFound(_) | ContentMissing(_) => StatusCode::NOT_FOUND,
+                    AlreadyExists(_) | Conflict(_) => StatusCode::CONFLICT,
+                    IsADirectory(_) | NotADirectory(_) | DirectoryNotEmpty(_) | InvalidPath(_)
+                    | InvalidArgument(_) => StatusCode::BAD_REQUEST,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                (status, e.to_string())
+            }
         };
-        (status, Json(json!({ "error": self.0.to_string() }))).into_response()
+        (status, Json(json!({ "error": message }))).into_response()
     }
 }
 
@@ -109,16 +257,10 @@ async fn read_file(State(ws): State<Shared>, Path(path): Path<String>) -> ApiRes
     Ok(ws.read(&abspath(&path)).await?.to_vec())
 }
 
-#[derive(Deserialize)]
-struct WriteQuery {
-    actor: Option<i64>,
-    session: Option<i64>,
-}
-
 async fn write_file(
     State(ws): State<Shared>,
+    Auth(principal): Auth,
     Path(path): Path<String>,
-    Query(q): Query<WriteQuery>,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let p = abspath(&path);
@@ -127,21 +269,14 @@ async fn write_file(
             ws.mkdir_p(parent).await?;
         }
     }
-    match q.actor {
-        Some(actor) => {
-            let ctx = match q.session {
-                Some(s) => WriteCtx::session(actor, s),
-                None => WriteCtx::actor(actor),
-            };
-            ws.write_as(ctx, &p, &body).await?;
-        }
-        None => ws.write(&p, &body).await?,
-    }
+    // Attribution comes only from the authenticated principal — never the request.
+    ws.write_as(principal.write_ctx(), &p, &body).await?;
     Ok(Json(json!({ "path": p, "written": body.len() })))
 }
 
 async fn delete_file(
     State(ws): State<Shared>,
+    _auth: Auth,
     Path(path): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let p = abspath(&path);
@@ -181,12 +316,13 @@ async fn list_dir(
     list_path(&ws, &abspath(&path)).await
 }
 
-async fn make_root(State(_ws): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
+async fn make_root(State(_ws): State<Shared>, _auth: Auth) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({ "created": "/" })))
 }
 
 async fn make_dir(
     State(ws): State<Shared>,
+    _auth: Auth,
     Path(path): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let p = abspath(&path);
@@ -226,6 +362,7 @@ struct RenameReq {
 
 async fn rename(
     State(ws): State<Shared>,
+    _auth: Auth,
     Json(req): Json<RenameReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ws.rename(&req.from, &req.to).await?;
@@ -236,19 +373,22 @@ async fn rename(
 
 #[derive(Deserialize)]
 struct CommitReq {
-    #[serde(default = "default_author")]
-    author: String,
     message: String,
-}
-fn default_author() -> String {
-    "api".to_string()
 }
 
 async fn commit(
     State(ws): State<Shared>,
+    Auth(principal): Auth,
     Json(req): Json<CommitReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let hash = ws.commit(&req.author, &req.message).await?;
+    // The commit author is the authenticated actor's display name, not a
+    // client-supplied string.
+    let author = ws
+        .get_actor(principal.actor)
+        .await?
+        .map(|a| a.display_name)
+        .unwrap_or_else(|| format!("actor:{}", principal.actor));
+    let hash = ws.commit(&author, &req.message).await?;
     Ok(Json(json!({ "hash": hash.to_hex() })))
 }
 
@@ -336,13 +476,6 @@ async fn diff_file(
 
 // --- agent-suggestion review queue ------------------------------------------
 
-fn write_ctx(actor: i64, session: Option<i64>) -> WriteCtx {
-    match session {
-        Some(s) => WriteCtx::session(actor, s),
-        None => WriteCtx::actor(actor),
-    }
-}
-
 #[derive(Serialize)]
 struct SuggestionDto {
     id: i64,
@@ -380,22 +513,22 @@ impl From<afs_sdk::Suggestion> for SuggestionDto {
 
 #[derive(Deserialize)]
 struct CreateSuggestQuery {
-    actor: i64,
-    session: Option<i64>,
     path: String,
     summary: Option<String>,
     #[serde(default)]
     delete: bool,
 }
 
-/// `POST /suggestions?actor=&path=&summary=` with the proposed bytes as the
-/// body (or `&delete=true` and an empty body to propose a deletion).
+/// `POST /suggestions?path=&summary=` with the proposed bytes as the body (or
+/// `&delete=true` and an empty body to propose a deletion). The proposing actor
+/// is the authenticated principal, never a request field.
 async fn create_suggestion(
     State(ws): State<Shared>,
+    Auth(principal): Auth,
     Query(q): Query<CreateSuggestQuery>,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let ctx = write_ctx(q.actor, q.session);
+    let ctx = principal.write_ctx();
     let id = if q.delete {
         ws.suggest_delete(ctx, &q.path, q.summary.as_deref()).await?
     } else {
@@ -449,27 +582,21 @@ async fn suggestion_diff(
     Ok(Json(json!({ "id": id, "diff": diff })))
 }
 
-#[derive(Deserialize)]
-struct ResolveQuery {
-    actor: i64,
-    session: Option<i64>,
-}
-
 async fn accept_suggestion(
     State(ws): State<Shared>,
+    Auth(principal): Auth,
     Path(id): Path<i64>,
-    Query(q): Query<ResolveQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    ws.accept_suggestion(id, write_ctx(q.actor, q.session)).await?;
+    ws.accept_suggestion(id, principal.write_ctx()).await?;
     Ok(Json(json!({ "accepted": id })))
 }
 
 async fn reject_suggestion(
     State(ws): State<Shared>,
+    Auth(principal): Auth,
     Path(id): Path<i64>,
-    Query(q): Query<ResolveQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    ws.reject_suggestion(id, write_ctx(q.actor, q.session)).await?;
+    ws.reject_suggestion(id, principal.write_ctx()).await?;
     Ok(Json(json!({ "rejected": id })))
 }
 
@@ -502,6 +629,7 @@ struct BranchReq {
 
 async fn create_branch(
     State(ws): State<Shared>,
+    _auth: Auth,
     Json(req): Json<BranchReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ws.create_branch(&req.name).await?;
@@ -510,6 +638,7 @@ async fn create_branch(
 
 async fn checkout(
     State(ws): State<Shared>,
+    _auth: Auth,
     Json(req): Json<BranchReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ws.checkout(&req.name).await?;
@@ -638,6 +767,7 @@ struct ActorReq {
 
 async fn create_actor(
     State(ws): State<Shared>,
+    _auth: Auth,
     Json(req): Json<ActorReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let id = if req.agent {
@@ -658,6 +788,7 @@ struct SessionReq {
 
 async fn create_session(
     State(ws): State<Shared>,
+    _auth: Auth,
     Json(req): Json<SessionReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let id = ws.create_session(req.actor, req.client.as_deref()).await?;

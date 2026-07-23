@@ -70,6 +70,15 @@ pub const MIGRATIONS: &[Migration] = &[
         sqlite: V8,
         postgres: V8,
     },
+    // V9 — one actor per external identity: a partial UNIQUE index on
+    // `auth_subject` (ignoring NULLs), so an app can map its own user id to an
+    // actor idempotently and `find_or_create_actor` is race-safe. Identical SQL in
+    // both dialects (both support partial unique indexes).
+    Migration {
+        version: 9,
+        sqlite: V9,
+        postgres: V9,
+    },
 ];
 
 // V8 — per-blob-version blame (see the migration entry above).
@@ -78,6 +87,12 @@ CREATE TABLE IF NOT EXISTS blob_blame(
     content_hash TEXT PRIMARY KEY,
     runs         TEXT NOT NULL
 );
+";
+
+// V9 — at most one actor per external identity (see the migration entry above).
+const V9: &str = "
+CREATE UNIQUE INDEX IF NOT EXISTS idx_actor_auth_subject
+    ON actor(auth_subject) WHERE auth_subject IS NOT NULL;
 ";
 
 // SQLite has no `ADD COLUMN IF NOT EXISTS`; the migration runner tolerates a

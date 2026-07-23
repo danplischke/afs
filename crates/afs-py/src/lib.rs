@@ -697,6 +697,54 @@ impl Workspace {
         })
     }
 
+    /// Look up an actor by external identity (`auth_subject`); returns a dict or
+    /// `None`. Use this (or `find_or_create_*`) to map your app's user id to an
+    /// afs actor without keeping a side table.
+    fn actor_by_subject<'py>(&self, py: Python<'py>, subject: String) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let found = ws.actor_by_subject(&subject).await.map_err(to_pyerr)?;
+            Python::attach(|py| match found {
+                Some(a) => Ok(Some(actor_dict(py, &a)?)),
+                None => Ok(None),
+            })
+        })
+    }
+
+    /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
+    /// returns the existing actor for that subject, or creates one. Race-safe.
+    fn find_or_create_human<'py>(
+        &self,
+        py: Python<'py>,
+        auth_subject: String,
+        display_name: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            ws.find_or_create_human(&auth_subject, &display_name)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Idempotently map an external identity to an **agent** actor.
+    #[pyo3(signature = (auth_subject, display_name, model, controller=None))]
+    fn find_or_create_agent<'py>(
+        &self,
+        py: Python<'py>,
+        auth_subject: String,
+        display_name: String,
+        model: String,
+        controller: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            ws.find_or_create_agent(&auth_subject, &display_name, &model, controller)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
     /// Open a session for an actor; returns its id.
     #[pyo3(signature = (actor_id, client=None))]
     fn create_session<'py>(

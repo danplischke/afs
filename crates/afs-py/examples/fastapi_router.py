@@ -57,8 +57,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-# Your own endpoints live alongside it — e.g. onboarding that creates the actor
-# id your `authn` will later resolve to.
+# Your own endpoints live alongside it — e.g. onboarding that maps your user id
+# to the afs actor your `authn` will later resolve to. find_or_create_human is
+# idempotent on the external id, so you don't keep a user->actor side table.
 @app.post("/users")
-async def create_user(name: str):
-    return {"actor_id": await app.state.ws.create_human(name, None)}
+async def upsert_user(external_id: str, name: str):
+    return {"actor_id": await app.state.ws.find_or_create_human(external_id, name)}

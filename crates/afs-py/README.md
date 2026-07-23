@@ -32,8 +32,10 @@ ws = await afs.Workspace.open_local("meta.db", "cas")
 # errors instead of being served). open_object_memory(db) runs the same adapter
 # with no network, for local dev/tests.
 
-# Inject the identity you resolved in your endpoint:
-ctx = afs.WriteCtx.session(actor_id, session_id)   # or afs.WriteCtx.actor(id)
+# Map your app's user id to an afs actor (idempotent; no side table needed):
+actor_id = await ws.find_or_create_human("user_42", "Dan")   # your id -> afs actor
+# then inject the identity you resolved in your endpoint:
+ctx = afs.WriteCtx.session(actor_id, session_id)   # or afs.WriteCtx.actor(actor_id)
 await ws.write_as(ctx, "/notes.txt", b"hello")      # attributed -> blame + audit
 
 diff = await ws.diff("main", "feature")             # [{"path","status"}, ...]
@@ -93,7 +95,8 @@ the suggestion review queue, the live feed, and presence).
 `read` · `write` ·
 `write_as` · `mkdir_p` · `ls` · `stat` · `remove` · `rename` · `commit` · `log` ·
 `status` · `diff` · `diff_file` · `create_branch` · `checkout` · `branches` ·
-`current_branch` · `create_human` · `create_agent` · `create_session` · `blame` ·
+`current_branch` · `create_human` · `create_agent` · `actor_by_subject` · `find_or_create_human` ·
+`find_or_create_agent` · `create_session` · `blame` ·
 `watch` · `presence` · `touch` · `suggest` · `suggest_delete` · `list_suggestions` ·
 `get_suggestion` · `suggestion_diff` · `accept_suggestion` · `reject_suggestion` ·
 `mount` · `serve_nfs`. Plus `WriteCtx`, `S3Config`, `Mount`, `fuse_mountable()`.

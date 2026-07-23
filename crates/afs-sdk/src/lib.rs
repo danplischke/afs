@@ -395,6 +395,31 @@ impl Workspace {
         self.fs.get_actor(id).await
     }
 
+    /// Look up an actor by external identity (`auth_subject`), if registered.
+    pub async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
+        self.fs.actor_by_subject(subject).await
+    }
+
+    /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
+    /// returns the existing actor for that subject, or creates one. Race-safe, so
+    /// you don't need to keep a user→actor side table.
+    pub async fn find_or_create_human(&self, auth_subject: &str, name: &str) -> Result<i64> {
+        self.fs.find_or_create_human(auth_subject, name).await
+    }
+
+    /// Idempotently map an external identity to an **agent** actor.
+    pub async fn find_or_create_agent(
+        &self,
+        auth_subject: &str,
+        name: &str,
+        model: &str,
+        controller: Option<i64>,
+    ) -> Result<i64> {
+        self.fs
+            .find_or_create_agent(auth_subject, name, model, controller)
+            .await
+    }
+
     pub async fn create_session(&self, actor_id: i64, client: Option<&str>) -> Result<i64> {
         self.fs.create_session(actor_id, client).await
     }

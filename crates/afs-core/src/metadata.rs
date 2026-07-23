@@ -121,6 +121,9 @@ pub trait MetadataStore: Send + Sync {
 
     async fn create_actor(&self, init: ActorInit) -> Result<i64>;
     async fn get_actor(&self, id: i64) -> Result<Option<Actor>>;
+    /// Look up an actor by external identity (`auth_subject`). At most one exists
+    /// (a partial UNIQUE index enforces it); returns `None` if unregistered.
+    async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>>;
     async fn create_session(
         &self,
         actor_id: i64,
@@ -308,6 +311,9 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn get_actor(&self, id: i64) -> Result<Option<Actor>> {
         (**self).get_actor(id).await
+    }
+    async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
+        (**self).actor_by_subject(subject).await
     }
     async fn create_session(
         &self,

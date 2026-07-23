@@ -263,6 +263,62 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         self.meta.get_actor(id).await
     }
 
+    /// Look up an actor by external identity (`auth_subject`), if registered.
+    pub async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
+        self.meta.actor_by_subject(subject).await
+    }
+
+    /// Idempotently map an external identity to an actor: return the actor already
+    /// registered for `init.auth_subject`, or create one and return its id. This
+    /// is how an application binds its own user id to an afs actor without keeping
+    /// a side table. Race-safe: a concurrent create that loses the unique-index
+    /// race resolves to the winner. Requires `init.auth_subject` to be set.
+    pub async fn find_or_create_actor(&self, init: ActorInit) -> Result<i64> {
+        let subject = init.auth_subject.clone().ok_or_else(|| {
+            AfsError::InvalidArgument("find_or_create_actor requires auth_subject".into())
+        })?;
+        if let Some(a) = self.meta.actor_by_subject(&subject).await? {
+            return Ok(a.id);
+        }
+        match self.meta.create_actor(init).await {
+            Ok(id) => Ok(id),
+            // A concurrent writer may have created it between our lookup and
+            // insert; if the subject now resolves, that's the winner, not an error.
+            Err(e) => match self.meta.actor_by_subject(&subject).await? {
+                Some(a) => Ok(a.id),
+                None => Err(e),
+            },
+        }
+    }
+
+    /// [`find_or_create_actor`](Self::find_or_create_actor) for a human, keyed by
+    /// `auth_subject` (e.g. your app's user id / JWT subject).
+    pub async fn find_or_create_human(
+        &self,
+        auth_subject: &str,
+        display_name: &str,
+    ) -> Result<i64> {
+        self.find_or_create_actor(ActorInit::human(
+            display_name,
+            Some(auth_subject.to_string()),
+        ))
+        .await
+    }
+
+    /// [`find_or_create_actor`](Self::find_or_create_actor) for an agent, keyed by
+    /// `auth_subject`.
+    pub async fn find_or_create_agent(
+        &self,
+        auth_subject: &str,
+        display_name: &str,
+        model: &str,
+        controller: Option<i64>,
+    ) -> Result<i64> {
+        let mut init = ActorInit::agent(display_name, model, controller);
+        init.auth_subject = Some(auth_subject.to_string());
+        self.find_or_create_actor(init).await
+    }
+
     /// Register a new agent actor whose controller is `controller`.
     pub async fn create_agent(
         &self,

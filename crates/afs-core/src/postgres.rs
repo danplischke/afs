@@ -686,6 +686,20 @@ impl MetadataStore for PostgresMetadataStore {
         }
     }
 
+    async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
+        // Resolve the id, then reuse get_actor for the row mapping.
+        let id: Option<i64> = {
+            let c = self.client().await?;
+            c.query_opt("SELECT id FROM actor WHERE auth_subject = $1", &[&subject])
+                .await?
+                .map(|r| r.get(0))
+        };
+        match id {
+            Some(id) => self.get_actor(id).await,
+            None => Ok(None),
+        }
+    }
+
     async fn create_session(
         &self,
         actor_id: i64,

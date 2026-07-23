@@ -266,15 +266,27 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
             session: s.session_id,
             tool_call: None,
         };
+        // The base the proposal was diffed against, as the CAS expectation below.
+        let expected_base = match &s.base_hash {
+            Some(hex) => Some(
+                Hash::from_hex(hex).ok_or_else(|| AfsError::Metadata("bad base hash".into()))?,
+            ),
+            None => None,
+        };
         match &s.proposed_hash {
             Some(hex) => {
                 let hash = Hash::from_hex(hex)
                     .ok_or_else(|| AfsError::Metadata("bad proposed hash".into()))?;
                 let bytes = self.content_bytes(&hash).await?;
-                self.write_as(author, &s.path, &bytes).await?;
+                // Apply atomically: the write only lands if the file is *still* at
+                // the base it was proposed against, so a change that slipped in
+                // after the staleness check above can't be silently clobbered.
+                self.write_as_expecting(author, &s.path, &bytes, expected_base)
+                    .await?;
             }
             None => {
-                // Proposed deletion.
+                // Proposed deletion. (The staleness pre-check above guards it; a
+                // conditional delete would close its narrower remaining window.)
                 self.remove(&s.path).await?;
             }
         }

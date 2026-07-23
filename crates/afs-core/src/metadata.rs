@@ -205,6 +205,18 @@ pub trait MetaTxn: Send {
     async fn create_inode(&mut self, init: InodeInit) -> Result<Ino>;
     /// Set an inode's content address and size.
     async fn set_content(&mut self, ino: Ino, content: Option<Hash>, size: u64) -> Result<()>;
+    /// Compare-and-set an inode's content: apply `content`/`size` only if the
+    /// inode's current content still equals `expected` (null-safe), returning
+    /// whether it applied. Lets an attributed write be conditional on the file not
+    /// having changed since it was read — the atomic apply behind a suggestion
+    /// accept (optimistic concurrency; no lost updates).
+    async fn set_content_if(
+        &mut self,
+        ino: Ino,
+        expected: Option<&Hash>,
+        content: Option<Hash>,
+        size: u64,
+    ) -> Result<bool>;
     /// Set an inode's link count.
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()>;
     /// Delete an inode (and any symlink row).

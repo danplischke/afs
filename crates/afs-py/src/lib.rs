@@ -19,7 +19,8 @@
 use afs_core::{LocalCasStore, PostgresMetadataStore};
 use afs_sdk::{
     Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, Inode, Presence,
-    Suggestion, SuggestionStatus, Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
+    S3Config as CoreS3Config, Suggestion, SuggestionStatus, Workspace as CoreWorkspace,
+    WriteCtx as CoreWriteCtx,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -220,6 +221,61 @@ impl WriteCtx {
     }
 }
 
+// --- S3 config --------------------------------------------------------------
+
+/// Connection settings for an S3-compatible object store (AWS S3, Cloudflare R2,
+/// GCS S3 API, MinIO). Pass to `Workspace.open_s3` / `open_pg_s3` (and their
+/// `_packed` forms). Credentials fall back to the environment / instance role
+/// when omitted.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct S3Config {
+    inner: CoreS3Config,
+}
+
+#[pymethods]
+impl S3Config {
+    #[new]
+    #[pyo3(signature = (
+        bucket,
+        region,
+        endpoint = None,
+        allow_http = false,
+        access_key_id = None,
+        secret_access_key = None,
+        prefix = None,
+    ))]
+    fn new(
+        bucket: String,
+        region: String,
+        endpoint: Option<String>,
+        allow_http: bool,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        prefix: Option<String>,
+    ) -> Self {
+        Self {
+            inner: CoreS3Config {
+                bucket,
+                region,
+                endpoint,
+                allow_http,
+                access_key_id,
+                secret_access_key,
+                prefix,
+            },
+        }
+    }
+
+    // Deliberately omits credentials.
+    fn __repr__(&self) -> String {
+        format!(
+            "S3Config(bucket={:?}, region={:?}, endpoint={:?}, prefix={:?})",
+            self.inner.bucket, self.inner.region, self.inner.endpoint, self.inner.prefix
+        )
+    }
+}
+
 // --- FUSE mount handle ------------------------------------------------------
 
 /// A live FUSE mount. Unmounts when `unmount()` is called or the object is
@@ -308,6 +364,90 @@ impl Workspace {
             let meta = Arc::new(PostgresMetadataStore::connect(&dsn).await.map_err(to_pyerr)?);
             let content = Arc::new(LocalCasStore::open(&cas_dir).await.map_err(to_pyerr)?);
             let ws = CoreWorkspace::open(meta, content).await.map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + an S3-compatible object store for content. Reads are
+    /// integrity-verified (a bit-rotted object errors instead of being served).
+    #[staticmethod]
+    fn open_s3<'py>(
+        py: Python<'py>,
+        db_path: String,
+        cfg: S3Config,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_s3(&db_path, cfg.inner)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + a **packed** S3 object store (few large PUTs instead of
+    /// many tiny ones) with the per-chunk index under `index_dir`. Call
+    /// `commit`/`flush` to seal the open pack and `repack` to reclaim space.
+    #[staticmethod]
+    fn open_s3_packed<'py>(
+        py: Python<'py>,
+        db_path: String,
+        cfg: S3Config,
+        index_dir: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_s3_packed(&db_path, cfg.inner, &index_dir)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// Postgres metadata (multi-writer) + an S3-compatible object store — the
+    /// production pairing for a shared human+agent workspace: many writers on one
+    /// database, one shared content store.
+    #[staticmethod]
+    fn open_pg_s3<'py>(
+        py: Python<'py>,
+        dsn: String,
+        cfg: S3Config,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_pg_s3(&dsn, cfg.inner)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// Postgres metadata + a **packed** S3 object store with the per-chunk index
+    /// under `index_dir`. The recommended object-storage layout for a team.
+    #[staticmethod]
+    fn open_pg_s3_packed<'py>(
+        py: Python<'py>,
+        dsn: String,
+        cfg: S3Config,
+        index_dir: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_pg_s3_packed(&dsn, cfg.inner, &index_dir)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + an **in-memory** object store — the same object-store
+    /// adapter as `open_s3` minus the network, for local dev and tests without a
+    /// live bucket. Content is not durable.
+    #[staticmethod]
+    fn open_object_memory<'py>(
+        py: Python<'py>,
+        db_path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_object_memory(&db_path)
+                .await
+                .map_err(to_pyerr)?;
             Python::attach(|py| Py::new(py, Workspace { inner: ws }))
         })
     }
@@ -786,6 +926,7 @@ fn fuse_mountable() -> bool {
 fn _afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Workspace>()?;
     m.add_class::<WriteCtx>()?;
+    m.add_class::<S3Config>()?;
     m.add_class::<Mount>()?;
     m.add_function(wrap_pyfunction!(fuse_mountable, m)?)?;
     m.add("AfsError", m.py().get_type::<AfsError>())?;

@@ -25,7 +25,12 @@ Wheels: `maturin build --release` (abi3, one wheel works on CPython ≥ 3.9).
 import afs
 
 ws = await afs.Workspace.open_local("meta.db", "cas")
-# ...or multi-writer: await afs.Workspace.open_pg(dsn, "cas")
+# ...or multi-writer on Postgres with S3-shared content (the production combo):
+#   cfg = afs.S3Config(bucket="my-bucket", region="us-east-1")   # + endpoint/keys
+#   ws  = await afs.Workspace.open_pg_s3(dsn, cfg)               # or open_pg_s3_packed
+# object-store constructors verify content integrity on read (a bit-rotted object
+# errors instead of being served). open_object_memory(db) runs the same adapter
+# with no network, for local dev/tests.
 
 # Inject the identity you resolved in your endpoint:
 ctx = afs.WriteCtx.session(actor_id, session_id)   # or afs.WriteCtx.actor(id)
@@ -83,10 +88,12 @@ the suggestion review queue, the live feed, and presence).
 
 ## API surface
 
-`Workspace`: `open_local` · `open_local_packed` · `open_pg` · `read` · `write` ·
+`Workspace`: `open_local` · `open_local_packed` · `open_pg` · `open_s3` ·
+`open_s3_packed` · `open_pg_s3` · `open_pg_s3_packed` · `open_object_memory` ·
+`read` · `write` ·
 `write_as` · `mkdir_p` · `ls` · `stat` · `remove` · `rename` · `commit` · `log` ·
 `status` · `diff` · `diff_file` · `create_branch` · `checkout` · `branches` ·
 `current_branch` · `create_human` · `create_agent` · `create_session` · `blame` ·
 `watch` · `presence` · `touch` · `suggest` · `suggest_delete` · `list_suggestions` ·
 `get_suggestion` · `suggestion_diff` · `accept_suggestion` · `reject_suggestion` ·
-`mount` · `serve_nfs`. Plus `WriteCtx`, `Mount`, `fuse_mountable()`.
+`mount` · `serve_nfs`. Plus `WriteCtx`, `S3Config`, `Mount`, `fuse_mountable()`.

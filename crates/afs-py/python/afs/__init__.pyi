@@ -24,6 +24,19 @@ class WriteCtx:
     @property
     def session_id(self) -> Optional[int]: ...
 
+class S3Config:
+    """Connection settings for an S3-compatible object store (S3/R2/GCS/MinIO)."""
+    def __init__(
+        self,
+        bucket: str,
+        region: str,
+        endpoint: Optional[str] = None,
+        allow_http: bool = False,
+        access_key_id: Optional[str] = None,
+        secret_access_key: Optional[str] = None,
+        prefix: Optional[str] = None,
+    ) -> None: ...
+
 class Mount:
     """A live FUSE mount; unmounts on ``unmount()``, ``with``-exit, or drop."""
     def unmount(self) -> None: ...
@@ -38,6 +51,16 @@ class Workspace:
     async def open_local_packed(db_path: str, data_dir: str, index_dir: str) -> "Workspace": ...
     @staticmethod
     async def open_pg(dsn: str, cas_dir: str) -> "Workspace": ...
+    @staticmethod
+    async def open_s3(db_path: str, cfg: S3Config) -> "Workspace": ...
+    @staticmethod
+    async def open_s3_packed(db_path: str, cfg: S3Config, index_dir: str) -> "Workspace": ...
+    @staticmethod
+    async def open_pg_s3(dsn: str, cfg: S3Config) -> "Workspace": ...
+    @staticmethod
+    async def open_pg_s3_packed(dsn: str, cfg: S3Config, index_dir: str) -> "Workspace": ...
+    @staticmethod
+    async def open_object_memory(db_path: str) -> "Workspace": ...
 
     # --- files ---
     async def read(self, path: str) -> bytes: ...

@@ -6,8 +6,8 @@
 //! milestones add commits and attribution behind the same façade.
 
 use afs_core::{
-    ContentStore, Fs, LocalCasStore, MetadataStore, ObjectContentStore, PostgresMetadataStore,
-    Result, S3Config, SqliteMetadataStore,
+    ContentStore, Fs, LocalCasStore, MetadataStore, PostgresMetadataStore, Result,
+    SqliteMetadataStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -15,8 +15,8 @@ use std::sync::Arc;
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, FileKind, GcStats, Hash, Inode, MemStore,
-    MergeOutcome, PackStore, Presence, Suggestion, SuggestionInit, SuggestionStatus, TieredStore,
-    ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
+    MergeOutcome, ObjectContentStore, PackStore, Presence, S3Config, Suggestion, SuggestionInit,
+    SuggestionStatus, TieredStore, ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -109,6 +109,42 @@ impl Workspace {
     /// Postgres metadata (multi-writer) over the given content backend.
     pub async fn open_pg(dsn: &str, content: Content) -> Result<Self> {
         let meta: Meta = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        Self::open(meta, content).await
+    }
+
+    /// Postgres metadata (multi-writer) + an S3-compatible object store for
+    /// content — the production pairing for a shared human+agent workspace: many
+    /// writers on one database, one shared content store. Reads are integrity-
+    /// verified (a bit-rotted object surfaces as `Corrupt`, not as authentic).
+    pub async fn open_pg_s3(dsn: &str, cfg: S3Config) -> Result<Self> {
+        let meta: Meta = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
+        Self::open(meta, content).await
+    }
+
+    /// Postgres metadata + a **packed** S3 object store (few large PUTs instead of
+    /// many tiny ones), with the per-chunk index in a local directory. The
+    /// recommended object-storage layout; seal the open pack with [`Workspace::flush`]
+    /// (or `commit`) and reclaim deleted space with [`Workspace::repack`].
+    pub async fn open_pg_s3_packed(
+        dsn: &str,
+        cfg: S3Config,
+        index_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let meta: Meta = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let data: Content = Arc::new(ObjectContentStore::s3(cfg)?);
+        let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(PackStore::new(data, index))));
+        Self::open(meta, content).await
+    }
+
+    /// SQLite metadata + an **in-memory** object store — the same object-store
+    /// adapter as [`Workspace::open_s3`] minus the network, so it exercises the
+    /// real object-storage content path (integrity verification included). For
+    /// local development and tests without a live bucket; content is not durable.
+    pub async fn open_object_memory(db_path: impl AsRef<Path>) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::in_memory())));
         Self::open(meta, content).await
     }
 

@@ -123,14 +123,17 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(name.to_string()));
         }
-        let ino = self
-            .meta
+        // Inode + dentry commit together, so a failed link can't orphan the
+        // inode (C1/M6).
+        let mut tx = self.meta.begin().await?;
+        let ino = tx
             .create_inode(InodeInit {
                 kind: FileKind::File,
                 mode: S_IFREG | (mode & 0o7777),
             })
             .await?;
-        self.meta.add_dentry(parent, name, ino).await?;
+        tx.add_dentry(parent, name, ino).await?;
+        tx.commit().await?;
         self.vfs_getattr(ino).await
     }
 
@@ -139,14 +142,15 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(name.to_string()));
         }
-        let ino = self
-            .meta
+        let mut tx = self.meta.begin().await?;
+        let ino = tx
             .create_inode(InodeInit {
                 kind: FileKind::Dir,
                 mode: S_IFDIR | (mode & 0o7777),
             })
             .await?;
-        self.meta.add_dentry(parent, name, ino).await?;
+        tx.add_dentry(parent, name, ino).await?;
+        tx.commit().await?;
         self.vfs_getattr(ino).await
     }
 
@@ -161,13 +165,15 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if inode.kind == FileKind::Dir {
             return Err(AfsError::IsADirectory(name.to_string()));
         }
-        self.meta.remove_dentry(parent, name).await?;
+        let mut tx = self.meta.begin().await?;
+        tx.remove_dentry(parent, name).await?;
         let nlink = inode.nlink - 1;
         if nlink <= 0 {
-            self.meta.delete_inode(ino).await?;
+            tx.delete_inode(ino).await?;
         } else {
-            self.meta.set_nlink(ino, nlink).await?;
+            tx.set_nlink(ino, nlink).await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -185,8 +191,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if self.meta.child_count(ino).await? > 0 {
             return Err(AfsError::DirectoryNotEmpty(name.to_string()));
         }
-        self.meta.remove_dentry(parent, name).await?;
-        self.meta.delete_inode(ino).await?;
+        let mut tx = self.meta.begin().await?;
+        tx.remove_dentry(parent, name).await?;
+        tx.delete_inode(ino).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -203,32 +211,39 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             .lookup(parent, name)
             .await?
             .ok_or_else(|| AfsError::NotFound(name.to_string()))?;
-        if let Some(dino) = self.meta.lookup(newparent, newname).await? {
-            if dino == sino {
-                return Ok(());
-            }
-            let dinode = self.vfs_getattr(dino).await?;
-            match dinode.kind {
-                FileKind::Dir => {
-                    if self.meta.child_count(dino).await? > 0 {
-                        return Err(AfsError::DirectoryNotEmpty(newname.to_string()));
-                    }
-                    self.meta.remove_dentry(newparent, newname).await?;
-                    self.meta.delete_inode(dino).await?;
+        // Resolve the destination's state before the txn; the mutations below
+        // commit together so a crash can't leave the source unlinked with the
+        // destination half-replaced (C1).
+        let overwrite = match self.meta.lookup(newparent, newname).await? {
+            Some(dino) if dino == sino => return Ok(()),
+            Some(dino) => {
+                let dinode = self.vfs_getattr(dino).await?;
+                if dinode.kind == FileKind::Dir && self.meta.child_count(dino).await? > 0 {
+                    return Err(AfsError::DirectoryNotEmpty(newname.to_string()));
                 }
+                Some((dino, dinode))
+            }
+            None => None,
+        };
+
+        let mut tx = self.meta.begin().await?;
+        if let Some((dino, dinode)) = overwrite {
+            tx.remove_dentry(newparent, newname).await?;
+            match dinode.kind {
+                FileKind::Dir => tx.delete_inode(dino).await?,
                 _ => {
-                    self.meta.remove_dentry(newparent, newname).await?;
                     let nlink = dinode.nlink - 1;
                     if nlink <= 0 {
-                        self.meta.delete_inode(dino).await?;
+                        tx.delete_inode(dino).await?;
                     } else {
-                        self.meta.set_nlink(dino, nlink).await?;
+                        tx.set_nlink(dino, nlink).await?;
                     }
                 }
             }
         }
-        self.meta.remove_dentry(parent, name).await?;
-        self.meta.add_dentry(newparent, newname, sino).await?;
+        tx.remove_dentry(parent, name).await?;
+        tx.add_dentry(newparent, newname, sino).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -237,15 +252,16 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(name.to_string()));
         }
-        let ino = self
-            .meta
+        let mut tx = self.meta.begin().await?;
+        let ino = tx
             .create_inode(InodeInit {
                 kind: FileKind::Symlink,
                 mode: SYMLINK_MODE,
             })
             .await?;
-        self.meta.set_symlink(ino, target).await?;
-        self.meta.add_dentry(parent, name, ino).await?;
+        tx.set_symlink(ino, target).await?;
+        tx.add_dentry(parent, name, ino).await?;
+        tx.commit().await?;
         self.vfs_getattr(ino).await
     }
 

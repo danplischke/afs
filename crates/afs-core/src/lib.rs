@@ -40,7 +40,7 @@ pub use engine::Fs;
 pub use error::{AfsError, Result};
 pub use gc::GcStats;
 pub use merge::{Conflict, MergeOutcome};
-pub use metadata::MetadataStore;
+pub use metadata::{MetaTxn, MetadataStore};
 pub use objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, Tree, TreeEntry, TreeKind, VersioningMode,
 };

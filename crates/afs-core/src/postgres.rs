@@ -3,20 +3,21 @@
 //!
 //! Runs the same schema as SQLite (via the shared [`crate::migrations`] list, in
 //! the Postgres dialect) so the engine and the whole FS test suite work unchanged.
-//! Postgres unlocks the shared-workspace goals: MVCC multi-writer, advisory locks
-//! for hot-inode critical sections, and `LISTEN/NOTIFY` change feeds (consumed by
-//! the watch API in M8).
+//! Postgres unlocks the shared-workspace goals: MVCC multi-writer, atomic
+//! multi-step writes (a pinned-connection [`MetaTxn`] serializes hot-inode
+//! critical sections on the unique dentry index), and `LISTEN/NOTIFY` change
+//! feeds (consumed by the watch API in M8).
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
 use crate::collab::{Event, EventInit, Presence, EVENT_CHANNEL};
 use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::error::{AfsError, Result};
-use crate::metadata::MetadataStore;
+use crate::metadata::{MetaTxn, MetadataStore};
 use crate::migrations::MIGRATIONS;
 use crate::types::{DirEntry, FileKind, Hash, Ino, Inode, InodeInit};
 use crate::util::now_secs;
 use async_trait::async_trait;
-use deadpool_postgres::{Manager, Pool};
+use deadpool_postgres::{Manager, Object, Pool};
 use futures::StreamExt;
 use std::pin::Pin;
 use tokio_postgres::error::SqlState;
@@ -70,21 +71,15 @@ impl PostgresMetadataStore {
             .map_err(|e| AfsError::Metadata(e.to_string()))
     }
 
-    /// Acquire a session-level advisory lock (`pg_advisory_lock`). Pair with
-    /// [`Self::advisory_unlock`]. Used to serialize hot-inode critical sections.
-    pub async fn advisory_lock(&self, key: i64) -> Result<()> {
-        let c = self.client().await?;
-        c.execute("SELECT pg_advisory_lock($1)", &[&key]).await?;
-        Ok(())
-    }
-
-    pub async fn advisory_unlock(&self, key: i64) -> Result<bool> {
-        let c = self.client().await?;
-        let row = c
-            .query_one("SELECT pg_advisory_unlock($1)", &[&key])
-            .await?;
-        Ok(row.get::<_, bool>(0))
-    }
+    // A session-level `pg_advisory_lock` helper used to live here (H11). It was
+    // structurally broken — it took the lock on a pooled connection and returned
+    // that connection (lock still held) to the pool, so the unlock could land on
+    // a different connection and the promised hot-inode serialization never
+    // existed. The engine never called it. Its purpose (stop concurrent
+    // same-path creates from orphaning an inode) is now served correctly by the
+    // `begin`/`MetaTxn` transaction (C1): the create + dentry link commit
+    // atomically, so a losing race errors on the unique dentry index and rolls
+    // back the inode instead of leaking it.
 
     /// Send a `LISTEN/NOTIFY` message (change-feed plumbing).
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<()> {
@@ -303,6 +298,15 @@ impl MetadataStore for PostgresMetadataStore {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn begin(&self) -> Result<Box<dyn MetaTxn>> {
+        // Pin one pooled connection for the whole `BEGIN … COMMIT`. All the
+        // transaction's statements run on this same connection; it returns to
+        // the pool only on commit or rollback.
+        let obj = self.client().await?;
+        obj.batch_execute("BEGIN").await?;
+        Ok(Box::new(PostgresTxn { obj: Some(obj) }))
     }
 
     async fn get_inode(&self, ino: Ino) -> Result<Option<Inode>> {
@@ -911,6 +915,157 @@ impl MetadataStore for PostgresMetadataStore {
             )
             .await?;
         Ok(n == 1)
+    }
+}
+
+/// A Postgres metadata transaction ([`MetadataStore::begin`]). Pins one pooled
+/// connection for `BEGIN … COMMIT`. Dropped without [`commit`](MetaTxn::commit)
+/// — an error path or a panic — it rolls back before the connection returns to
+/// the pool, so no half-applied write commits and no reused connection inherits
+/// an open transaction.
+struct PostgresTxn {
+    /// `Some` while open; `commit`/`Drop` take it to close exactly once.
+    obj: Option<Object>,
+}
+
+impl PostgresTxn {
+    fn conn(&self) -> &Object {
+        self.obj.as_ref().expect("transaction already finished")
+    }
+}
+
+#[async_trait]
+impl MetaTxn for PostgresTxn {
+    async fn create_inode(&mut self, init: InodeInit) -> Result<Ino> {
+        let now = now_secs();
+        let mode = init.mode as i64;
+        let row = self
+            .conn()
+            .query_one(
+                "INSERT INTO inode(kind, mode, nlink, size, content_hash, mtime, ctime)
+                 VALUES ($1, $2, 1, 0, NULL, $3, $3) RETURNING ino",
+                &[&init.kind.as_str(), &mode, &now],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn set_content(&mut self, ino: Ino, content: Option<Hash>, size: u64) -> Result<()> {
+        let hex = content.map(|h| h.to_hex());
+        let size = size as i64;
+        let now = now_secs();
+        self.conn()
+            .execute(
+                "UPDATE inode SET content_hash = $1, size = $2, mtime = $3, ctime = $3 WHERE ino = $4",
+                &[&hex, &size, &now, &ino],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()> {
+        self.conn()
+            .execute("UPDATE inode SET nlink = $1 WHERE ino = $2", &[&nlink, &ino])
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_inode(&mut self, ino: Ino) -> Result<()> {
+        let c = self.conn();
+        c.execute("DELETE FROM symlink WHERE ino = $1", &[&ino])
+            .await?;
+        c.execute("DELETE FROM inode WHERE ino = $1", &[&ino])
+            .await?;
+        Ok(())
+    }
+
+    async fn add_dentry(&mut self, parent: Ino, name: &str, ino: Ino) -> Result<()> {
+        match self
+            .conn()
+            .execute(
+                "INSERT INTO dentry(parent_ino, name, ino) VALUES ($1, $2, $3)",
+                &[&parent, &name, &ino],
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.code() == Some(&SqlState::UNIQUE_VIOLATION) => {
+                Err(AfsError::AlreadyExists(name.to_string()))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn remove_dentry(&mut self, parent: Ino, name: &str) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM dentry WHERE parent_ino = $1 AND name = $2",
+                &[&parent, &name],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_symlink(&mut self, ino: Ino, target: &str) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO symlink(ino, target) VALUES ($1, $2)
+                 ON CONFLICT (ino) DO UPDATE SET target = EXCLUDED.target",
+                &[&ino, &target],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_line_blame(&mut self, ino: Ino, runs: &str) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO line_blame(ino, runs) VALUES ($1, $2)
+                 ON CONFLICT (ino) DO UPDATE SET runs = EXCLUDED.runs",
+                &[&ino, &runs],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn append_edit_op(&mut self, op: EditOpInit) -> Result<i64> {
+        let row = self
+            .conn()
+            .query_one(
+                "INSERT INTO edit_op(session_id, actor_id, tool_call_id, ino, path, op, byte_start, byte_len, pre_hash, post_hash, ts)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
+                &[
+                    &op.session_id, &op.actor_id, &op.tool_call_id, &op.ino, &op.path, &op.op,
+                    &op.byte_start, &op.byte_len, &op.pre_hash, &op.post_hash, &op.ts,
+                ],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<()> {
+        let obj = self.obj.take().expect("transaction already finished");
+        obj.batch_execute("COMMIT").await?;
+        // `obj` drops here, returning a clean (no open txn) connection to the pool.
+        Ok(())
+    }
+}
+
+impl Drop for PostgresTxn {
+    fn drop(&mut self) {
+        // If the transaction wasn't committed, roll it back before the pinned
+        // connection returns to the pool — otherwise a reused connection would
+        // inherit the open transaction. `Drop` can't `await`, so spawn the
+        // ROLLBACK and move the connection into that task; it is recycled only
+        // once the rollback completes. Outside a runtime (a drop in sync
+        // context) we let the connection close instead.
+        if let Some(obj) = self.obj.take()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn(async move {
+                let _ = obj.batch_execute("ROLLBACK").await;
+            });
+        }
     }
 }
 

@@ -18,6 +18,19 @@ pub trait MetadataStore: Send + Sync {
     /// Create the schema (idempotent) and ensure the root directory (`INO_ROOT`).
     async fn init(&self) -> Result<()>;
 
+    /// Begin an atomic write transaction (`docs/DESIGN.md` §4b).
+    ///
+    /// A logical filesystem write is several statements — create an inode, link
+    /// a dentry, set content, record blame, append an op-log entry — and if any
+    /// step fails or the process crashes between them the store is left corrupt:
+    /// a dangling dentry, an orphaned inode, or a content/blame mismatch. Route
+    /// such writes through a transaction so they commit all-or-nothing. Dropping
+    /// the returned [`MetaTxn`] without [`commit`](MetaTxn::commit) rolls back.
+    ///
+    /// SQLite uses `BEGIN IMMEDIATE` (one writer at a time); Postgres pins a
+    /// pooled connection for the `BEGIN…COMMIT`.
+    async fn begin(&self) -> Result<Box<dyn MetaTxn>>;
+
     /// Fetch an inode by number.
     async fn get_inode(&self, ino: Ino) -> Result<Option<Inode>>;
 
@@ -164,12 +177,49 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<bool>;
 }
 
+/// An in-progress atomic write, returned by [`MetadataStore::begin`].
+///
+/// It exposes only the write subset a logical filesystem operation needs. Reads
+/// (existence checks, `get_inode`) are done on the store *before* `begin`; the
+/// store's own constraints — chiefly the unique `(parent, name)` dentry index —
+/// together with all-or-nothing rollback ensure a losing race (two creators of
+/// the same path) errors and unwinds cleanly instead of orphaning an inode.
+///
+/// Mutations are staged and become visible only on [`commit`](Self::commit).
+/// Dropping without committing rolls the whole transaction back.
+#[async_trait]
+pub trait MetaTxn: Send {
+    /// Allocate a new inode (`nlink` = 1, no content). Returns its number.
+    async fn create_inode(&mut self, init: InodeInit) -> Result<Ino>;
+    /// Set an inode's content address and size.
+    async fn set_content(&mut self, ino: Ino, content: Option<Hash>, size: u64) -> Result<()>;
+    /// Set an inode's link count.
+    async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()>;
+    /// Delete an inode (and any symlink row).
+    async fn delete_inode(&mut self, ino: Ino) -> Result<()>;
+    /// Link `name` in `parent` to `ino`. Errors if the name already exists.
+    async fn add_dentry(&mut self, parent: Ino, name: &str, ino: Ino) -> Result<()>;
+    /// Unlink `name` from `parent` (no-op if absent).
+    async fn remove_dentry(&mut self, parent: Ino, name: &str) -> Result<()>;
+    /// Set (or replace) a symlink target.
+    async fn set_symlink(&mut self, ino: Ino, target: &str) -> Result<()>;
+    /// Set (or replace) an inode's line-authorship map.
+    async fn set_line_blame(&mut self, ino: Ino, runs: &str) -> Result<()>;
+    /// Append an op-log entry, returning its id.
+    async fn append_edit_op(&mut self, op: EditOpInit) -> Result<i64>;
+    /// Commit every staged mutation atomically. Consumes the transaction.
+    async fn commit(self: Box<Self>) -> Result<()>;
+}
+
 /// Delegating impl so `Arc<dyn MetadataStore>` (and `Arc<ConcreteStore>`) is
 /// itself a [`MetadataStore`]. This lets a workspace pick its backend at runtime.
 #[async_trait]
 impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     async fn init(&self) -> Result<()> {
         (**self).init().await
+    }
+    async fn begin(&self) -> Result<Box<dyn MetaTxn>> {
+        (**self).begin().await
     }
     async fn get_inode(&self, ino: Ino) -> Result<Option<Inode>> {
         (**self).get_inode(ino).await

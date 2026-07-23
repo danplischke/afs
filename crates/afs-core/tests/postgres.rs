@@ -1,5 +1,5 @@
 //! Postgres backend: the same metadata + engine behavior as SQLite, plus a
-//! concurrent-writers check and the advisory-lock / NOTIFY helpers.
+//! concurrent-writers check, atomic-create serialization, and the NOTIFY helper.
 //!
 //! Self-skips unless `AFS_PG_TEST_URL` points at a reachable database, e.g.
 //!   AFS_PG_TEST_URL="host=/tmp/afs-pg/sock port=5433 user=postgres dbname=afs"
@@ -170,10 +170,8 @@ async fn postgres_backend() {
         SuggestionStatus::Accepted
     );
 
-    // --- advisory lock + NOTIFY helpers -------------------------------------
+    // --- NOTIFY helper ------------------------------------------------------
     let pg = PostgresMetadataStore::connect(&dsn).await.unwrap();
-    pg.advisory_lock(4242).await.unwrap();
-    assert!(pg.advisory_unlock(4242).await.unwrap());
     pg.notify("afs_changes", "hello").await.unwrap();
 }
 
@@ -278,4 +276,72 @@ async fn postgres_drain_is_bounded() {
     // ordered + contiguous across pages
     assert_eq!(first[0].seq + 1, first[1].seq);
     assert_eq!(first.last().unwrap().seq + 1, second[0].seq);
+}
+
+/// C1/H11: many writers racing to create the *same* path serialize on the unique
+/// dentry index. Each create + link is one transaction, so a loser's inode rolls
+/// back instead of being orphaned. We assert that directly by counting inode
+/// rows — exactly root + the one file, no leaked inodes from lost create races.
+/// (Before the transaction primitive, the promised advisory-lock serialization
+/// was structurally broken and unused, so losers left orphaned inodes.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_concurrent_same_path_create_leaves_no_orphans() {
+    let Some(dsn) = dsn() else {
+        eprintln!("skipping postgres_concurrent_same_path_create: AFS_PG_TEST_URL unset");
+        return;
+    };
+    let _guard = pg_lock().lock().await;
+    reset(&dsn).await;
+
+    let content = Arc::new(MemStore::new());
+    let fs = Arc::new(Fs::new(
+        PostgresMetadataStore::connect(&dsn).await.unwrap(),
+        content,
+    ));
+    fs.init().await.unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..16 {
+        let fs = fs.clone();
+        handles.push(tokio::spawn(async move {
+            fs.write("/race.txt", format!("writer-{i}").as_bytes()).await
+        }));
+    }
+    let mut ok = 0;
+    for h in handles {
+        if h.await.unwrap().is_ok() {
+            ok += 1;
+        }
+    }
+
+    // At least one writer wins; the file exists, is readable and consistent, and
+    // there is exactly one dentry for it.
+    assert!(ok >= 1, "at least one concurrent create must succeed");
+    let body = fs.read("/race.txt").await.unwrap();
+    assert!(body.starts_with(b"writer-"), "content is one writer's bytes");
+    let root = fs.ls("/").await.unwrap();
+    assert_eq!(
+        root.iter().filter(|e| e.name == "race.txt").count(),
+        1,
+        "exactly one race.txt entry"
+    );
+
+    // The decisive check: no orphaned inodes. Only root (ino 1) and race.txt.
+    let (client, conn) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let n: i64 = client
+        .query_one("SELECT count(*) FROM inode", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        n, 2,
+        "root + one file; lost create races must not orphan inodes"
+    );
+    drop(client);
+    let _ = handle.await;
 }

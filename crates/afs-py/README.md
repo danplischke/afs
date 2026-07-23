@@ -90,6 +90,27 @@ while True:
         ...                        # push to the client
 ```
 
+## Run an agent in a live overlay
+
+`afs.overlay.run` launches an agent in a fast native kernel overlay while its
+edits stream into afs, attributed to an actor — the way agents are meant to work
+day to day. It shells out to the `afs` CLI (the overlay is host orchestration,
+not embedded in the extension), operating on a workspace **directory** the API
+also opens:
+
+```python
+import afs
+from afs.overlay import run
+
+ws_dir = "./ws"
+api   = await afs.Workspace.open_local(f"{ws_dir}/meta.db", f"{ws_dir}/cas")
+actor = await api.find_or_create_agent("agent-token", "claude", "opus")
+code  = await run(ws_dir, actor, ["claude", "-p", "refactor the parser"])
+```
+
+Requires the `afs` binary on PATH and a Linux host with unprivileged
+user-namespace overlays.
+
 ## Mount orchestration
 
 ```python

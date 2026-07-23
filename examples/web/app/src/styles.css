@@ -462,6 +462,75 @@ code {
   color: var(--ink);
 }
 
+/* Inline track-changes: the proposal rendered *in the document*, with the
+   agent's changes inline (old red / new green) and a ✓/✗ per change. */
+.suggestion-doc {
+  flex: 1;
+  overflow: auto;
+  max-width: 900px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 16px 28px 40vh 64px; /* left room for the ✓/✗ controls */
+}
+.sug-equal > :first-child {
+  margin-top: 0.2em;
+}
+.sug-change {
+  position: relative;
+  margin: 1px 0;
+  border-radius: 4px;
+}
+.sug-controls {
+  position: absolute;
+  left: -52px;
+  top: 1px;
+  display: inline-flex;
+  gap: 2px;
+}
+.sug-controls button {
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  border-radius: 5px;
+}
+.sug-controls button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.sug-text {
+  white-space: pre-wrap;
+}
+.w-del,
+.w-add {
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.w-del {
+  text-decoration: line-through;
+}
+.sug-change.kept .w-del {
+  color: var(--del-ink);
+  background: color-mix(in srgb, var(--del-ink) 12%, transparent);
+  opacity: 0.72;
+}
+.sug-change.kept .w-add {
+  color: var(--add-ink);
+  background: color-mix(in srgb, var(--add-ink) 16%, transparent);
+  text-decoration: none;
+}
+.sug-change.discarded .w-add {
+  color: var(--muted);
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.sug-change.discarded .w-del {
+  color: var(--ink);
+  background: transparent;
+  text-decoration: none;
+  opacity: 1;
+}
+
 /* --- blame view ----------------------------------------------------------- */
 
 .blame-view {

@@ -1,17 +1,20 @@
 // Inline review of a pending agent suggestion — the VSCode "review agent edits"
-// experience. The proposal is shown as an inline line diff (red removed / green
-// added); you Keep or Discard each hunk, then Apply.
+// experience, rendered *in the document*: unchanged text reads normally, the
+// agent's changes appear inline (old text struck through in red, new text in
+// green), and you Keep or Discard each change right there.
 //
 // Keep-all applies through afs's native accept (atomic, credits the agent). A
 // partial keep is reconstructed server-side and written *as the agent*, so the
 // agent stays credited for its lines — the reviewer only ever chooses which
-// hunks, never authors them.
+// changes, never authors them.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { diffWordsWithSpace } from "diff";
 import { useSession } from "../session";
 import { AfsError } from "../lib/afsClient";
 import { ActorChip } from "../components/ActorBadge";
 import { DiffText } from "../panels/DiffText";
+import { renderProse } from "./prose";
 import type { SuggestionDetail } from "../lib/types";
 
 export function ReviewOverlay({
@@ -131,42 +134,50 @@ export function ReviewOverlay({
         </span>
       </div>
       {error && <div className="notice err">{error}</div>}
-      <div className="review-body">
+      <div className="suggestion-doc plate-content">
         {detail.segments.map((seg, i) => {
           if (seg.hunk === null) {
-            return seg.del.map((line, j) => (
-              <div className="rl ctx" key={`c${i}-${j}`}>
-                <span className="rl-sign"> </span>
-                <span className="rl-text">{line || " "}</span>
-              </div>
-            ));
+            // Unchanged text — rendered like the document.
+            return <div className="sug-equal" key={`e${i}`}>{renderProse(seg.del)}</div>;
           }
           const h = seg.hunk;
           const on = keep[h];
+          // Word-level diff of the removed vs added lines, so only the changed
+          // words are colored — the rest reads as normal text.
+          const parts = diffWordsWithSpace(seg.del.join("\n"), seg.add.join("\n"));
           return (
-            <div className={`hunk ${on ? "kept" : "discarded"}`} key={`h${i}`}>
-              <div className="hunk-actions">
-                <button className={on ? "active" : ""} onClick={() => setKeep((k) => ({ ...k, [h]: true }))}>
-                  ✓ Keep
+            <div className={`sug-change ${on ? "kept" : "discarded"}`} key={`h${i}`}>
+              <span className="sug-controls" role="group" aria-label={`change ${h + 1}`}>
+                <button
+                  className={on ? "active" : ""}
+                  onClick={() => setKeep((k) => ({ ...k, [h]: true }))}
+                  title="Keep — accept the agent's change"
+                >
+                  ✓
                 </button>
-                <button className={!on ? "active" : ""} onClick={() => setKeep((k) => ({ ...k, [h]: false }))}>
-                  ✗ Discard
+                <button
+                  className={!on ? "active" : ""}
+                  onClick={() => setKeep((k) => ({ ...k, [h]: false }))}
+                  title="Discard — keep the original"
+                >
+                  ✗
                 </button>
-              </div>
-              <div className="hunk-lines">
-                {seg.del.map((line, j) => (
-                  <div className="rl del" key={`d${j}`}>
-                    <span className="rl-sign">−</span>
-                    <span className="rl-text">{line || " "}</span>
-                  </div>
-                ))}
-                {seg.add.map((line, j) => (
-                  <div className="rl add" key={`a${j}`}>
-                    <span className="rl-sign">+</span>
-                    <span className="rl-text">{line || " "}</span>
-                  </div>
-                ))}
-              </div>
+              </span>
+              <span className="sug-text">
+                {parts.map((p, j) =>
+                  p.removed ? (
+                    <del className="w-del" key={j}>
+                      {p.value}
+                    </del>
+                  ) : p.added ? (
+                    <ins className="w-add" key={j}>
+                      {p.value}
+                    </ins>
+                  ) : (
+                    <span key={j}>{p.value}</span>
+                  ),
+                )}
+              </span>
             </div>
           );
         })}

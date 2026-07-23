@@ -11,7 +11,7 @@ end to end:
 | | |
 |---|---|
 | **Attribution** | afs records per-line **blame** on every attributed write. The editor shows it three ways: an **authorship gutter** beside each block, a GitLens-style **inline annotation** on the caret's line (who wrote it, in their color), and an exact **Blame tab** (every source line with its author, like `git blame`). |
-| **Inline suggestions** | When an agent proposes an edit, review it **inline in the editor** — VSCode agent-edit style: red/green diff, per-hunk **✓ Keep / ✗ Discard**, and **Keep all / Discard**. Attribution is preserved (see below): keeping credits the *agent*, never the reviewer. |
+| **Inline suggestions** | When an agent proposes an edit, review it **inline in the document** — VSCode agent-edit style: unchanged text reads normally, the change appears in place (old text struck through in red, new text in green, **word-level**), with a **✓ Keep / ✗ Discard** on each change plus **Keep all / Discard**. Attribution is preserved (see below): keeping credits the *agent*, never the reviewer. |
 | **Lineage** | The **History tab** is afs's commit DAG — pick a commit to see the unified diff it introduced. The **Suggestions tab** is the full propose-and-review queue across documents. |
 | **Live** | Presence (who's here now) and an SSE **activity feed** of every attributed change, straight off afs's change feed. |
 | **Trust** | Identity is resolved **server-side**. The browser sends a bearer token; the server maps it to an afs actor and attributes the write. The request body never names an actor, so **attribution can't be forged**. |

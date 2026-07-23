@@ -1,0 +1,15 @@
+# node / vite
+node_modules/
+dist/
+*.tsbuildinfo
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# afs workspaces the demo server creates locally
+cas/
+*.db
+afs-web-ws/

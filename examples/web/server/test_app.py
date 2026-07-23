@@ -1,0 +1,128 @@
+"""Tests for the afs document server (examples/web/server/app.py).
+
+Run (after building the bindings — see requirements.txt):
+    pip install fastapi httpx pytest
+    pytest test_app.py            # or: python test_app.py
+
+The end-to-end tests use a real afs.Workspace (a temp dir opened by the app's
+lifespan), so they need the compiled `afs` extension. They prove the thing that
+matters: a write made through the server is attributed, server-side, to the
+actor the bearer token resolves to — and a client can't forge that.
+"""
+import afs  # noqa: F401  (import guard: the app needs the compiled extension)
+from fastapi.testclient import TestClient
+
+from app import app
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_config_lists_demo_tokens():
+    with TestClient(app) as c:
+        cfg = c.get("/api/config").json()
+        assert cfg["demo"] is True
+        names = {t["token"] for t in cfg["tokens"]}
+        assert {"tok-ada", "tok-grace", "tok-claude"} <= names
+
+
+def test_actor_directory_is_complete_at_startup():
+    # Every demo principal is onboarded on startup, so the id-only feeds
+    # (events/suggestions) always resolve to a name.
+    with TestClient(app) as c:
+        actors = c.get("/api/actors").json()
+        by_name = {a["display_name"]: a for a in actors}
+        assert "Ada Lovelace" in by_name and by_name["Ada Lovelace"]["kind"] == "human"
+        assert "claude" in by_name and by_name["claude"]["kind"] == "agent"
+
+
+def test_unauthenticated_write_is_refused():
+    with TestClient(app) as c:
+        r = c.put("/fs/files/notes.md", content=b"sneaky")
+        assert r.status_code == 401, r.text
+
+
+def test_write_is_attributed_and_doc_load_carries_blame():
+    with TestClient(app) as c:
+        # /api/me resolves the token to an afs actor server-side.
+        me = c.get("/api/me", headers=_auth("tok-ada")).json()
+        assert me["display_name"] == "Ada Lovelace" and me["kind"] == "human"
+
+        body = b"# Notes\nfirst line by ada\nsecond line by ada\n"
+        r = c.put("/fs/files/notes.md", content=body, headers=_auth("tok-ada"))
+        assert r.status_code == 200, r.text
+
+        doc = c.get("/api/doc/notes.md").json()
+        assert doc["exists"] is True
+        assert doc["text"] == body.decode()
+        # blame covers every line, all credited to Ada (a human).
+        assert doc["blame"], "attributed write must produce blame"
+        assert all(r["actor"]["display_name"] == "Ada Lovelace" for r in doc["blame"])
+        assert all(r["actor"]["kind"] == "human" for r in doc["blame"])
+        covered = {ln for r in doc["blame"] for ln in range(r["line_start"], r["line_end"] + 1)}
+        assert covered == {1, 2, 3}
+
+
+def test_missing_doc_loads_as_empty_not_404():
+    with TestClient(app) as c:
+        doc = c.get("/api/doc/does/not/exist.md").json()
+        assert doc == {"path": "/does/not/exist.md", "exists": False, "text": "", "blame": []}
+
+
+def test_suggestion_flow_mixes_human_and_agent_blame():
+    with TestClient(app) as c:
+        v1 = b"# Notes\nwritten by ada\n"
+        c.put("/fs/files/doc.md", content=v1, headers=_auth("tok-ada")).raise_for_status()
+
+        # An agent *suggests* an edit — the working tree is untouched until accepted.
+        v2 = b"# Notes\nwritten by ada\nappended by claude\n"
+        r = c.post(
+            "/fs/suggestions",
+            params={"path": "/doc.md", "summary": "append a line"},
+            content=v2,
+            headers=_auth("tok-claude"),
+        )
+        r.raise_for_status()
+        sid = r.json()["id"]
+        assert c.get("/api/doc/doc.md").json()["text"] == v1.decode(), "not applied yet"
+
+        pending = c.get("/fs/suggestions", params={"status": "pending"}).json()
+        assert sid in [s["id"] for s in pending]
+        assert "appended by claude" in c.get(f"/fs/suggestions/{sid}/diff").text
+
+        # A reviewer accepts it — applied, credited to the agent (the author).
+        c.post(f"/fs/suggestions/{sid}/accept", headers=_auth("tok-grace")).raise_for_status()
+        doc = c.get("/api/doc/doc.md").json()
+        assert doc["text"] == v2.decode()
+        kinds = {r["actor"]["kind"] for r in doc["blame"]}
+        assert kinds == {"human", "agent"}, f"blame should mix human + agent, got {kinds}"
+
+
+def test_commit_then_log_records_history():
+    with TestClient(app) as c:
+        c.put("/fs/files/h.md", content=b"one\n", headers=_auth("tok-ada")).raise_for_status()
+        r = c.post("/fs/commit", json={"message": "first", "author": "ada"},
+                   headers=_auth("tok-ada"))
+        r.raise_for_status()
+        log = c.get("/fs/log").json()
+        assert log and log[0]["message"] == "first"
+        assert isinstance(log[0]["hash"], str) and len(log[0]["hash"]) == 64
+
+
+if __name__ == "__main__":
+    import sys
+    import traceback
+
+    failures = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print("ok  ", name)
+            except Exception:  # noqa: BLE001
+                failures += 1
+                print("FAIL", name)
+                traceback.print_exc()
+    print("ALL OK" if not failures else f"{failures} FAILED")
+    sys.exit(1 if failures else 0)

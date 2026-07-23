@@ -13,6 +13,7 @@ import { Plate, PlateContent, usePlateEditor } from "platejs/react";
 import { deserializeMd, serializeMd } from "@platejs/markdown";
 import { editorPlugins } from "./plugins";
 import { AttributionGutter } from "./AttributionGutter";
+import { InlineBlameAnnotation } from "./InlineBlameAnnotation";
 import { blockAuthorship, blockLineSpans, type BlockAuthorship } from "../lib/blame";
 import { useSession } from "../session";
 import { AfsError } from "../lib/afsClient";
@@ -108,6 +109,7 @@ export function EditorTab({
         )}
         <Plate editor={editor} onChange={onChange}>
           <PlateContent className="plate-content" placeholder="Write Markdown…" spellCheck />
+          {showGutter && <InlineBlameAnnotation containerRef={containerRef} authorship={authorship} />}
         </Plate>
       </div>
     </div>

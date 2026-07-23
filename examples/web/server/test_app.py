@@ -99,6 +99,63 @@ def test_suggestion_flow_mixes_human_and_agent_blame():
         assert kinds == {"human", "agent"}, f"blame should mix human + agent, got {kinds}"
 
 
+def test_inline_review_detail_exposes_hunks():
+    with TestClient(app) as c:
+        c.put("/fs/files/r.md", content=b"line one\nline two\nline three\n",
+              headers=_auth("tok-ada")).raise_for_status()
+        r = c.post("/api/suggest", params={"path": "/r.md", "summary": "tweak"},
+                   content=b"line one CHANGED\nline two\nline three\nline four added\n",
+                   headers=_auth("tok-claude"))
+        r.raise_for_status()
+        sid = r.json()["id"]
+        detail = c.get(f"/api/suggestion/{sid}").json()
+        assert detail["actor_kind"] == "agent" and detail["actor_name"] == "claude"
+        assert detail["hunks"] == 2, detail
+        # segments: a replace (hunk 0) and an insert (hunk 1), plus equal context.
+        changed = [s for s in detail["segments"] if s["hunk"] is not None]
+        assert {s["hunk"] for s in changed} == {0, 1}
+
+
+def test_inline_partial_keep_credits_the_agent_not_the_reviewer():
+    with TestClient(app) as c:
+        c.put("/fs/files/p.md", content=b"line one\nline two\nline three\n",
+              headers=_auth("tok-ada")).raise_for_status()
+        sid = c.post("/api/suggest", params={"path": "/p.md"},
+                     content=b"line one CHANGED\nline two\nline three\nline four added\n",
+                     headers=_auth("tok-claude")).json()["id"]
+
+        # Grace reviews and keeps only hunk 0 (the change to line 1), discarding
+        # the added line 4.
+        r = c.post(f"/api/suggestion/{sid}/apply", json={"keep": [0]}, headers=_auth("tok-grace"))
+        r.raise_for_status()
+        assert r.json()["mode"] == "partial"
+
+        doc = c.get("/api/doc/p.md").json()
+        assert doc["text"] == "line one CHANGED\nline two\nline three\n", doc["text"]
+        by_line = {}
+        for rng in doc["blame"]:
+            for ln in range(rng["line_start"], rng["line_end"] + 1):
+                by_line[ln] = rng["actor"]
+        # The kept change (line 1) is credited to the AGENT, not Grace the reviewer.
+        assert by_line[1]["kind"] == "agent" and by_line[1]["display_name"] == "claude"
+        assert by_line[2]["display_name"] == "Ada Lovelace"
+
+
+def test_inline_keep_all_uses_native_accept():
+    with TestClient(app) as c:
+        c.put("/fs/files/k.md", content=b"alpha\nbeta\n", headers=_auth("tok-ada")).raise_for_status()
+        sid = c.post("/api/suggest", params={"path": "/k.md"},
+                     content=b"alpha\nbeta\ngamma by claude\n",
+                     headers=_auth("tok-claude")).json()["id"]
+        r = c.post(f"/api/suggestion/{sid}/apply", json={"keep": [0]}, headers=_auth("tok-grace"))
+        r.raise_for_status()
+        assert r.json()["mode"] == "accept"  # single hunk, all kept → native accept
+        doc = c.get("/api/doc/k.md").json()
+        assert "gamma by claude" in doc["text"]
+        last = doc["blame"][-1]["actor"]
+        assert last["kind"] == "agent" and last["display_name"] == "claude"
+
+
 def test_commit_then_log_records_history():
     with TestClient(app) as c:
         c.put("/fs/files/h.md", content=b"one\n", headers=_auth("tok-ada")).raise_for_status()

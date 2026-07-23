@@ -10,8 +10,9 @@ end to end:
 
 | | |
 |---|---|
-| **Attribution** | afs records per-line **blame** on every attributed write. The editor shows it two ways: an **authorship gutter** beside each block (who wrote it), and an exact **Blame tab** (every source line with its author, like `git blame`). |
-| **Lineage** | The **History tab** is afs's commit DAG — pick a commit to see the unified diff it introduced. The **Suggestions tab** is the propose-and-review queue: an agent proposes an edit, a reviewer accepts it, and afs lands it *credited to the agent* while recording the approver. |
+| **Attribution** | afs records per-line **blame** on every attributed write. The editor shows it three ways: an **authorship gutter** beside each block, a GitLens-style **inline annotation** on the caret's line (who wrote it, in their color), and an exact **Blame tab** (every source line with its author, like `git blame`). |
+| **Inline suggestions** | When an agent proposes an edit, review it **inline in the editor** — VSCode agent-edit style: red/green diff, per-hunk **✓ Keep / ✗ Discard**, and **Keep all / Discard**. Attribution is preserved (see below): keeping credits the *agent*, never the reviewer. |
+| **Lineage** | The **History tab** is afs's commit DAG — pick a commit to see the unified diff it introduced. The **Suggestions tab** is the full propose-and-review queue across documents. |
 | **Live** | Presence (who's here now) and an SSE **activity feed** of every attributed change, straight off afs's change feed. |
 | **Trust** | Identity is resolved **server-side**. The browser sends a bearer token; the server maps it to an afs actor and attributes the write. The request body never names an actor, so **attribution can't be forged**. |
 
@@ -96,6 +97,28 @@ PlateJS edits **blocks**. The example bridges the two honestly:
 Unattributed content (a plain `write`, not `write_as`) has **no** blame — afs
 returns an empty list, and the UI says so rather than crediting anyone.
 
+## Inline review — keep/discard without losing attribution
+
+The inline suggestion review (VSCode's "review agent edits") has a granularity
+mismatch with afs to solve: afs's `accept` applies a *whole* proposal atomically
+and credits the original author, but VSCode lets you keep/discard **per hunk**.
+The example keeps both the per-hunk UX *and* afs's credit-the-author guarantee:
+
+- **Keep all** → afs's native `accept_suggestion` — atomic, refuses a stale base
+  (409), credits the agent. The fast path.
+- **Partial keep** → the server reconstructs just the kept hunks (`base` + chosen
+  changes) and writes the result **as the agent** (`write_as` with the agent's
+  actor). The server is the trusted identity boundary, so the agent stays
+  credited for its lines; the reviewer only ever *chooses* hunks, never authors
+  them. The original proposal is then resolved.
+- **Discard all** → afs's `reject_suggestion`.
+
+So a reviewer can accept half of an agent's proposal and blame still shows those
+lines as the agent's — which is the whole point of afs. (Partial keep bypasses
+afs's atomic accept CAS, so it's a deliberate demo trade-off; keep-all is the
+CAS-safe path.) See `server/app.py` (`/api/suggestion/{id}/apply`) and
+`app/src/review/ReviewOverlay.tsx`.
+
 ## Layout
 
 ```
@@ -111,7 +134,9 @@ app/
                     blame.ts (line↔block mapping), colors.ts, time.ts
     session.tsx     token → actor, the actor directory, per-actor color
     doc/            useDocument — load text + blame, stale-while-revalidate
-    editor/         Editor (Plate), AttributionGutter, BlameView, plugins
+    editor/         EditPane (editor + inline review), Editor (Plate),
+                    AttributionGutter, InlineBlameAnnotation, BlameView, plugins
+    review/         ReviewOverlay — inline red/green diff, per-hunk keep/discard
     panels/         HistoryPanel, SuggestionsPanel, ActivityFeed, DiffText
     App.tsx, main.tsx, styles.css
 ```

@@ -39,15 +39,17 @@ or ``AFS_WORKSPACE=/srv/ws`` (local dir). Default is a throwaway temp workspace.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import os
 import tempfile
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 import afs
 from afs.fastapi import build_router
@@ -161,6 +163,10 @@ async def lifespan(app: FastAPI):
     # fresh TestClient per test) swaps the workspace without stacking routers.
     app.state.ws = ws
     app.state.identity = identity
+    # Proposed text stashed by suggestion id, so the inline review can render a
+    # line diff and reconstruct a partial keep. In-memory (demo); a real app would
+    # read the proposed content back from afs by hash.
+    app.state.proposed = {}
     try:
         yield
     finally:
@@ -309,12 +315,155 @@ async def feed(request: Request, since: int = 0):
     )
 
 
+# --- inline suggestion review (VSCode-style agent edits) --------------------
+# afs's suggestion queue is propose-then-accept. These endpoints let the UI show
+# a pending suggestion *inline* as a line diff and Keep/Discard it per hunk.
+#
+# Attribution is preserved: "keep all" uses afs's native accept (atomic, credits
+# the agent). A *partial* keep can't go through afs accept (that applies the whole
+# proposal), so the server reconstructs the kept hunks and writes them **as the
+# agent** — the server is the trusted identity boundary, so the agent stays
+# credited for its lines and the reviewer never is.
+
+
+def _abs(path: str) -> str:
+    return path if path.startswith("/") else "/" + path
+
+
+async def _read_text(ws: "afs.Workspace", path: str) -> str:
+    try:
+        return bytes(await ws.read(path)).decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
+def _segments(base: str, proposed: str) -> tuple[list[dict[str, Any]], int]:
+    """Line-diff base→proposed as a list of segments. Each changed segment is a
+    'hunk' with an index; equal segments carry the shared lines. The frontend
+    renders these inline and sends back which hunk indices to keep."""
+    b, p = base.splitlines(), proposed.splitlines()
+    segs: list[dict[str, Any]] = []
+    hunk = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=b, b=p, autojunk=False).get_opcodes():
+        if tag == "equal":
+            segs.append({"tag": "equal", "del": b[i1:i2], "add": b[i1:i2], "hunk": None})
+        else:
+            segs.append({"tag": tag, "del": b[i1:i2], "add": p[j1:j2], "hunk": hunk})
+            hunk += 1
+    return segs, hunk
+
+
+def _reconstruct(segs: list[dict[str, Any]], keep: set[int], base: str, proposed: str) -> str:
+    out: list[str] = []
+    for s in segs:
+        if s["hunk"] is None:
+            out.extend(s["del"])            # equal (del == add)
+        elif s["hunk"] in keep:
+            out.extend(s["add"])            # keep the agent's change
+        else:
+            out.extend(s["del"])            # discard: fall back to the base
+    merged = "\n".join(out)
+    if merged and (proposed.endswith("\n") or base.endswith("\n")):
+        merged += "\n"
+    return merged
+
+
+class _ApplyReq(BaseModel):
+    keep: list[int]  # hunk indices to keep
+
+
+@app.post("/api/suggest")
+async def suggest(
+    request: Request,
+    path: str = Query(...),
+    summary: Optional[str] = Query(default=None),
+    body: bytes = Body(default=b""),
+    ctx: "afs.WriteCtx" = Depends(_authn),
+) -> dict[str, Any]:
+    """Propose an edit *and* stash the proposed text, so the inline review can
+    diff it. Same attribution as the router's /fs/suggestions (agent-authored,
+    not applied until accepted) — this just also remembers the bytes."""
+    ws = _ws(request)
+    sid = await ws.suggest(ctx, _abs(path), body, summary)
+    request.app.state.proposed[sid] = body.decode("utf-8", errors="replace")
+    return {"id": sid}
+
+
+@app.get("/api/suggestion/{sid}")
+async def suggestion_detail(request: Request, sid: int) -> dict[str, Any]:
+    """A pending suggestion as an inline line diff (base vs proposed)."""
+    ws = _ws(request)
+    sug = await ws.get_suggestion(sid)
+    if sug is None:
+        raise HTTPException(status_code=404, detail=f"no suggestion #{sid}")
+    info = _identity(request).resolve(sug["actor_id"])
+    base = await _read_text(ws, sug["path"])
+    proposed = request.app.state.proposed.get(sid)
+    out: dict[str, Any] = {
+        **sug,
+        "actor_name": info["display_name"] if info else f"actor #{sug['actor_id']}",
+        "actor_kind": info["kind"] if info else "agent",
+        "base_text": base,
+    }
+    if proposed is None:
+        # Not stashed (e.g. proposed straight to /fs) — fall back to the unified
+        # diff; the UI shows it read-only and routes accept/reject to the queue.
+        out["segments"] = None
+        out["unified"] = await ws.suggestion_diff(sid)
+    else:
+        segs, total = _segments(base, proposed)
+        out["segments"] = segs
+        out["hunks"] = total
+    return out
+
+
+@app.post("/api/suggestion/{sid}/apply")
+async def apply_suggestion(
+    request: Request,
+    sid: int,
+    req: _ApplyReq,
+    ctx: "afs.WriteCtx" = Depends(_authn),
+) -> dict[str, Any]:
+    """Keep the chosen hunks. Keep-all → afs accept (credits the agent, refuses a
+    stale base). Partial → the server writes the kept hunks as the agent, then
+    resolves the original proposal. Discard-all → reject."""
+    ws = _ws(request)
+    sug = await ws.get_suggestion(sid)
+    if sug is None:
+        raise HTTPException(status_code=404, detail=f"no suggestion #{sid}")
+    proposed = request.app.state.proposed.get(sid)
+    if proposed is None:
+        raise HTTPException(status_code=400, detail="no stashed proposal; use the queue accept/reject")
+
+    base = await _read_text(ws, sug["path"])
+    segs, total = _segments(base, proposed)
+    keep = {i for i in req.keep if 0 <= i < total}
+
+    if total > 0 and len(keep) == total:
+        await ws.accept_suggestion(sid, ctx)  # native accept: atomic, credits the agent
+        return {"applied": True, "mode": "accept", "kept": len(keep), "total": total}
+
+    merged = _reconstruct(segs, keep, base, proposed)
+    if merged != base:
+        # Write the kept hunks AS THE AGENT so its lines stay credited to it.
+        agent_id = sug["actor_id"]
+        agent_session = await ws.create_session(agent_id, client="review-apply")
+        agent_ctx = afs.WriteCtx.session(agent_id, agent_session)
+        await ws.write_as(agent_ctx, sug["path"], merged.encode("utf-8"))
+    await ws.reject_suggestion(sid, ctx)  # original proposal resolved (superseded)
+    request.app.state.proposed.pop(sid, None)
+    return {"applied": True, "mode": "partial", "kept": len(keep), "total": total}
+
+
 @app.get("/")
 async def index() -> dict[str, Any]:
     return {
         "service": "afs web — attribution & lineage",
         "afs_api": "/fs (files, blame, commit, log, diff, suggestions, events, presence)",
-        "app_api": ["/api/config", "/api/me", "/api/actors", "/api/doc/{path}", "/api/feed"],
+        "app_api": [
+            "/api/config", "/api/me", "/api/actors", "/api/doc/{path}", "/api/feed",
+            "/api/suggest", "/api/suggestion/{id}", "/api/suggestion/{id}/apply",
+        ],
         "how": "send Authorization: Bearer <token>; writes are attributed to that principal",
         "frontend": "run the Vite app in ../app and open http://localhost:5173",
     }

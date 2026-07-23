@@ -15,6 +15,7 @@ import type {
   Me,
   Presence,
   Suggestion,
+  SuggestionDetail,
   SuggestionStatus,
 } from "./types";
 
@@ -156,16 +157,43 @@ export class AfsClient {
     );
   }
 
+  /**
+   * Propose an edit through the app layer (/api/suggest), which also stashes the
+   * proposed text so it can be reviewed inline. Same attribution as the raw
+   * router suggest — the write is agent-authored and not applied until kept.
+   */
   async suggest(path: string, text: string, summary?: string): Promise<number> {
     const q = new URLSearchParams({ path });
     if (summary) q.set("summary", summary);
-    const res = await fetch(`${this.base}/fs/suggestions?${q}`, {
+    const res = await fetch(`${this.base}/api/suggest?${q}`, {
       method: "POST",
       headers: this.authHeaders({ "Content-Type": "application/octet-stream" }),
       body: new Blob([text], { type: "application/octet-stream" }),
     });
     const { id } = await this.json<{ id: number }>(res);
     return id;
+  }
+
+  /** A pending suggestion rendered as an inline line diff (base vs proposed). */
+  suggestionDetail(id: number): Promise<SuggestionDetail> {
+    return fetch(`${this.base}/api/suggestion/${id}`).then((r) => this.json<SuggestionDetail>(r));
+  }
+
+  /**
+   * Keep the chosen hunks. Keep-all → afs's native accept (credits the agent);
+   * a partial keep → the server writes the kept hunks as the agent. Either way
+   * the agent stays credited, never the reviewer.
+   */
+  async applySuggestion(
+    id: number,
+    keep: number[],
+  ): Promise<{ applied: boolean; mode: "accept" | "partial"; kept: number; total: number }> {
+    const res = await fetch(`${this.base}/api/suggestion/${id}/apply`, {
+      method: "POST",
+      headers: this.authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ keep }),
+    });
+    return this.json(res);
   }
 
   async acceptSuggestion(id: number): Promise<void> {

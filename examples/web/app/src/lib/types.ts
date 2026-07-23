@@ -85,6 +85,26 @@ export interface Suggestion {
   resolved_by: number | null;
 }
 
+/** One segment of an inline line-diff (GET /api/suggestion/{id}). Changed
+ * segments carry a `hunk` index the reviewer keeps or discards; equal segments
+ * have `hunk === null` and identical `del`/`add`. */
+export interface DiffSegment {
+  tag: "equal" | "replace" | "delete" | "insert";
+  del: string[];
+  add: string[];
+  hunk: number | null;
+}
+
+/** A pending suggestion rendered as an inline diff for review. */
+export interface SuggestionDetail extends Suggestion {
+  actor_name: string;
+  actor_kind: ActorKind;
+  base_text: string;
+  segments: DiffSegment[] | null; // null → not stashed; use `unified` read-only
+  hunks?: number;
+  unified?: string;
+}
+
 /** A change-feed event (GET /fs/events and the SSE stream GET /api/feed). */
 export interface ChangeEvent {
   seq: number;

@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { useSession } from "./session";
 import { useDocument } from "./doc/useDocument";
-import { EditorTab } from "./editor/Editor";
+import { EditPane } from "./editor/EditPane";
 import { BlameView } from "./editor/BlameView";
 import { HistoryPanel } from "./panels/HistoryPanel";
 import { SuggestionsPanel } from "./panels/SuggestionsPanel";
@@ -116,12 +116,12 @@ export function App() {
             {!doc ? (
               <div className="empty">{loading ? `Loading ${path}…` : `Could not load ${path}.`}</div>
             ) : tab === "edit" ? (
-              <EditorTab
+              <EditPane
                 key={path}
                 path={path}
                 initialText={doc.text}
                 blame={doc.blame}
-                onSaved={afterWrite}
+                onChanged={afterWrite}
               />
             ) : tab === "blame" ? (
               <BlameView text={doc.text} blame={doc.blame} />

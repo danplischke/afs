@@ -307,6 +307,161 @@ code {
   overflow-x: auto;
 }
 
+/* --- inline attribution (GitLens-style current-line annotation) ----------- */
+
+.inline-blame {
+  position: absolute;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  pointer-events: none;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+.inline-blame-meta {
+  color: var(--muted);
+}
+
+/* --- inline suggestion review (VSCode-style agent edits) ------------------ */
+
+.edit-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.edit-pane > .editor-tab {
+  flex: 1;
+  min-height: 0;
+}
+
+.review-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: color-mix(in srgb, #b7791f 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, #b7791f 40%, transparent);
+  font-size: 13px;
+}
+.review-banner-icon {
+  font-size: 16px;
+}
+.ok-notice {
+  background: var(--add-bg);
+  border-color: var(--add-ink);
+  color: var(--add-ink);
+}
+
+.review {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.review-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline);
+  flex-wrap: wrap;
+}
+.review-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.review-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+.review-bar .row-actions {
+  margin-left: auto;
+}
+.review-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.rl {
+  display: flex;
+  padding: 0 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.rl-sign {
+  width: 16px;
+  flex-shrink: 0;
+  color: var(--muted);
+  user-select: none;
+}
+.rl.ctx {
+  color: var(--muted);
+}
+.rl.del {
+  background: var(--del-bg);
+  color: var(--del-ink);
+}
+.rl.add {
+  background: var(--add-bg);
+  color: var(--add-ink);
+}
+
+.hunk {
+  position: relative;
+  margin: 6px 0;
+  border: 1px solid var(--hairline);
+  border-left-width: 3px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.hunk.kept {
+  border-left-color: var(--add-ink);
+}
+.hunk.discarded {
+  border-left-color: var(--muted);
+}
+.hunk-actions {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--muted) 8%, transparent);
+  border-bottom: 1px solid var(--hairline);
+}
+.hunk-actions button {
+  font-size: 11px;
+  padding: 1px 8px;
+}
+.hunk-actions button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.hunk-lines {
+  padding: 4px 0;
+}
+/* Dim the lines that won't survive the current keep/discard choice. */
+.hunk.kept .rl.del {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+.hunk.discarded .rl.add {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.hunk.discarded .rl.del {
+  background: transparent;
+  color: var(--ink);
+}
+
 /* --- blame view ----------------------------------------------------------- */
 
 .blame-view {

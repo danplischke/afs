@@ -242,6 +242,16 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
             )));
         }
 
+        // The review gate: a suggestion's own author cannot approve it. This is
+        // what makes "an agent proposes, a different actor reviews" a real gate
+        // rather than a rubber stamp the proposer can apply to itself.
+        if approver.actor == s.actor_id {
+            return Err(AfsError::InvalidArgument(format!(
+                "suggestion #{id} cannot be accepted by its author (actor {}); acceptance requires a different reviewer",
+                s.actor_id
+            )));
+        }
+
         // Staleness: the file must still be what the proposal was based on.
         let current = self.current_content_hex(&s.path).await?;
         if current != s.base_hash {

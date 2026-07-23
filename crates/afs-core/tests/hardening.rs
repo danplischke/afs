@@ -67,6 +67,7 @@ fn manifest_with_lying_size_is_rejected() {
 async fn gc_keeps_pending_suggestion_content() {
     let fs = fixture().await;
     let actor = fs.create_human("dan", None).await.unwrap();
+    let reviewer = fs.create_human("reviewer", None).await.unwrap();
     fs.write("/f.txt", b"one\n").await.unwrap();
     fs.commit("dan", "base").await.unwrap();
 
@@ -79,7 +80,7 @@ async fn gc_keeps_pending_suggestion_content() {
     fs.gc().await.unwrap();
 
     assert!(fs.suggestion_diff(sid).await.unwrap().contains("+two"));
-    fs.accept_suggestion(sid, WriteCtx::actor(actor)).await.unwrap();
+    fs.accept_suggestion(sid, WriteCtx::actor(reviewer)).await.unwrap();
     assert_eq!(&fs.read("/f.txt").await.unwrap()[..], b"one\ntwo\n");
 }
 
@@ -89,15 +90,16 @@ async fn gc_keeps_pending_suggestion_content() {
 async fn empty_suggestion_is_not_a_deletion() {
     let fs = fixture().await;
     let actor = fs.create_human("dan", None).await.unwrap();
+    let reviewer = fs.create_human("reviewer", None).await.unwrap();
     fs.write("/e.txt", b"stuff\n").await.unwrap();
 
     let sid = fs.suggest(WriteCtx::actor(actor), "/e.txt", b"", None).await.unwrap();
-    fs.accept_suggestion(sid, WriteCtx::actor(actor)).await.unwrap();
+    fs.accept_suggestion(sid, WriteCtx::actor(reviewer)).await.unwrap();
     // still present, now empty
     assert_eq!(&fs.read("/e.txt").await.unwrap()[..], b"");
 
     let del = fs.suggest_delete(WriteCtx::actor(actor), "/e.txt", None).await.unwrap();
-    fs.accept_suggestion(del, WriteCtx::actor(actor)).await.unwrap();
+    fs.accept_suggestion(del, WriteCtx::actor(reviewer)).await.unwrap();
     assert!(fs.read("/e.txt").await.is_err());
 }
 

@@ -17,12 +17,18 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 afs-core = { version = "0.1.0", path = "../afs-core" }
 afs-sdk = { version = "0.1.0", path = "../afs-sdk" }
-afs-fuse = { version = "0.0.0", path = "../afs-fuse" }
-afs-nfs = { version = "0.0.0", path = "../afs-nfs" }
-fuser = "0.17"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync"] }
 pyo3 = { version = "0.29.0", features = ["abi3-py39"] }
 pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
+
+# FUSE mount + NFS serving are Unix-only; gating them here lets the extension
+# build on Windows (exposing the portable surface: files, versioning,
+# attribution, suggestions, the feed, and every backend). The mount/serve_nfs
+# methods raise a clear error on platforms without them.
+[target.'cfg(unix)'.dependencies]
+afs-fuse = { version = "0.0.0", path = "../afs-fuse" }
+afs-nfs = { version = "0.0.0", path = "../afs-nfs" }
+fuser = "0.17"
 
 [features]
 # Enabled only when building the wheel (see pyproject.toml). Off during

@@ -40,6 +40,7 @@ pub use encrypt::EncryptedStore;
 pub use engine::Fs;
 pub use error::{AfsError, Result};
 pub use gc::GcStats;
+pub use migrations::latest_schema_version;
 pub use merge::{Conflict, MergeOutcome};
 pub use metadata::{MetaTxn, MetadataStore};
 pub use objectgraph::{

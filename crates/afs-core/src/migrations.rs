@@ -81,6 +81,17 @@ pub const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// The highest migration version this build knows about — the schema version a
+/// freshly-opened (or migrated) workspace is brought up to. Compare against a
+/// store's [`MetadataStore::schema_version`](crate::MetadataStore::schema_version)
+/// to tell whether it needs migrating.
+pub fn latest_schema_version() -> i64 {
+    match MIGRATIONS.last() {
+        Some(m) => m.version,
+        None => 0,
+    }
+}
+
 // V8 — per-blob-version blame (see the migration entry above).
 const V8: &str = "
 CREATE TABLE IF NOT EXISTS blob_blame(

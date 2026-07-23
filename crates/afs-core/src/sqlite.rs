@@ -144,6 +144,20 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    async fn schema_version(&self) -> Result<i64> {
+        let conn = self.lock();
+        match conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_meta",
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(v) => Ok(v),
+            // A store that was never initialized has no schema_meta table yet.
+            Err(e) if e.to_string().contains("no such table") => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn begin(&self) -> Result<Box<dyn MetaTxn>> {
         // Hold the connection lock for the whole transaction — SQLite is
         // single-writer, so this both serializes writers and lets the txn issue

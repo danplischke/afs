@@ -426,6 +426,33 @@ impl Workspace {
         self.fs.get_actor(id).await
     }
 
+    // --- schema / migrations -------------------------------------------------
+
+    /// The migration version currently applied to this workspace's metadata DB.
+    /// A normal open already brings this to [`latest_schema_version`](Self::latest_schema_version);
+    /// this is here for operators who want to introspect or gate on it.
+    pub async fn schema_version(&self) -> Result<i64> {
+        self.fs.meta.schema_version().await
+    }
+
+    /// The highest schema version this build knows about.
+    pub fn latest_schema_version(&self) -> i64 {
+        afs_core::latest_schema_version()
+    }
+
+    /// Apply any pending metadata migrations, returning `(from, to)` versions.
+    /// Idempotent and forward-only — a normal open runs the same migration path,
+    /// so this is mainly for explicitly upgrading a shared DB after deploying a
+    /// build with new migrations, or verifying that one is current.
+    pub async fn migrate(&self) -> Result<(i64, i64)> {
+        let before = self.fs.meta.schema_version().await?;
+        // `MetadataStore::init` is exactly the (idempotent) migration runner — it
+        // applies unrecorded steps and touches nothing else (no ref/HEAD reset).
+        self.fs.meta.init().await?;
+        let after = self.fs.meta.schema_version().await?;
+        Ok((before, after))
+    }
+
     /// Look up an actor by external identity (`auth_subject`), if registered.
     pub async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
         self.fs.actor_by_subject(subject).await

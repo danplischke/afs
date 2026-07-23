@@ -79,7 +79,10 @@ impl Tree {
             return Err(bad());
         }
         let count = u32::from_le_bytes(bytes[5..9].try_into().map_err(|_| bad())?) as usize;
-        let mut entries = Vec::with_capacity(count);
+        // Cap the pre-alloc by what the remaining bytes could actually hold (min
+        // 39 bytes/entry: 7-byte header + 32-byte hash) so a crafted count can't
+        // drive a multi-GB allocation and abort the process (cf. Manifest::decode).
+        let mut entries = Vec::with_capacity(count.min(bytes.len().saturating_sub(9) / 39));
         let mut off = 9;
         for _ in 0..count {
             if off + 7 > bytes.len() {
@@ -149,7 +152,9 @@ impl Commit {
         off += 32;
         let pc = u32::from_le_bytes(bytes[off..off + 4].try_into().map_err(|_| bad())?) as usize;
         off += 4;
-        let mut parents = Vec::with_capacity(pc);
+        // Cap the pre-alloc by the remaining bytes (32 bytes/parent) so a hostile
+        // count can't force a huge allocation (cf. Manifest::decode).
+        let mut parents = Vec::with_capacity(pc.min(bytes.len().saturating_sub(off) / 32));
         for _ in 0..pc {
             if off + 32 > bytes.len() {
                 return Err(bad());
@@ -236,7 +241,10 @@ impl RefSnapshot {
         }
         let generation = u64::from_le_bytes(bytes[5..13].try_into().map_err(|_| bad())?);
         let count = u32::from_le_bytes(bytes[13..17].try_into().map_err(|_| bad())?) as usize;
-        let mut refs = Vec::with_capacity(count);
+        // Cap the pre-alloc by the remaining bytes (min 6 bytes/entry: a 2-byte
+        // name length + a 4-byte value length) so a hostile count can't force a
+        // huge allocation and abort the process (cf. Manifest::decode).
+        let mut refs = Vec::with_capacity(count.min(bytes.len().saturating_sub(17) / 6));
         let mut off = 17;
         for _ in 0..count {
             if off + 2 > bytes.len() {

@@ -7,7 +7,7 @@
 //! incrementally).
 
 use crate::content::ContentStore;
-use crate::engine::Fs;
+use crate::engine::{Fs, validate_component};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::types::{DirEntry, FileKind, Ino, Inode, InodeInit};
@@ -120,6 +120,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     /// Create a regular file under `parent`.
     pub async fn vfs_create(&self, parent: Ino, name: &str, mode: u32) -> Result<Inode> {
+        validate_component(name)?;
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(name.to_string()));
         }
@@ -139,6 +140,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     /// Create a directory under `parent`.
     pub async fn vfs_mkdir(&self, parent: Ino, name: &str, mode: u32) -> Result<Inode> {
+        validate_component(name)?;
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(name.to_string()));
         }
@@ -206,6 +208,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         newparent: Ino,
         newname: &str,
     ) -> Result<()> {
+        // Validate only the newly-introduced destination name; the source must
+        // already exist (so it is already well-formed, and a pre-existing odd
+        // entry stays renamable/removable).
+        validate_component(newname)?;
         let sino = self
             .meta
             .lookup(parent, name)
@@ -249,6 +255,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     /// Create a symlink under `parent`.
     pub async fn vfs_symlink(&self, parent: Ino, name: &str, target: &str) -> Result<Inode> {
+        validate_component(name)?;
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(name.to_string()));
         }

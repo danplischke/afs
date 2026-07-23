@@ -237,6 +237,11 @@ enum Cmd {
         /// Address to bind, e.g. `127.0.0.1:8080`.
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: std::net::SocketAddr,
+        /// Bearer-token → actor mapping `TOKEN=ACTOR_ID[:SESSION_ID]` (repeatable).
+        /// Required to bind a non-loopback address; on loopback with none given,
+        /// all writes are attributed to an auto-created local actor (dev only).
+        #[arg(long = "auth-token", value_name = "TOKEN=ACTOR[:SESSION]")]
+        auth_tokens: Vec<String>,
     },
     /// Serve the workspace over NFSv3 (blocks; mount with `-o vers=3,tcp,port=…`).
     Nfs {
@@ -759,9 +764,10 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Serve { addr } => {
+        Cmd::Serve { addr, auth_tokens } => {
+            let auth = build_api_auth(&ws, &addr, &auth_tokens).await?;
             println!("serving afs at http://{addr} (Ctrl-C to stop)");
-            afs_api::serve(std::sync::Arc::new(ws), addr).await?;
+            afs_api::serve(std::sync::Arc::new(ws), addr, auth).await?;
         }
         Cmd::Nfs { addr } => {
             println!(
@@ -771,4 +777,44 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Build the HTTP API authenticator from `--auth-token` specs. afs never trusts a
+/// client-named actor, so the server must resolve identity itself. With no specs:
+/// refuse to expose a non-loopback address, and on loopback attribute all writes
+/// to an auto-created local actor (dev convenience only).
+async fn build_api_auth(
+    ws: &Workspace,
+    addr: &std::net::SocketAddr,
+    specs: &[String],
+) -> Result<std::sync::Arc<dyn afs_api::Authenticator>> {
+    if specs.is_empty() {
+        if !addr.ip().is_loopback() {
+            anyhow::bail!(
+                "refusing to expose an unauthenticated API on {addr}: pass --auth-token TOKEN=ACTOR_ID (repeatable), or bind a loopback address for local dev"
+            );
+        }
+        let actor = ws.find_or_create_human("local", "local").await?;
+        eprintln!(
+            "warning: no --auth-token given; attributing all writes to local actor {actor} (dev only, loopback bind)"
+        );
+        return Ok(std::sync::Arc::new(afs_api::LocalDevAuth(
+            afs_api::Principal {
+                actor,
+                session: None,
+            },
+        )));
+    }
+    let mut bearer = afs_api::BearerAuth::new();
+    for spec in specs {
+        let (token, who) = spec.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("bad --auth-token {spec:?}; expected TOKEN=ACTOR_ID[:SESSION_ID]")
+        })?;
+        let (actor, session) = match who.split_once(':') {
+            Some((a, s)) => (a.parse()?, Some(s.parse()?)),
+            None => (who.parse()?, None),
+        };
+        bearer = bearer.with_token(token.to_string(), actor, session);
+    }
+    Ok(std::sync::Arc::new(bearer))
 }

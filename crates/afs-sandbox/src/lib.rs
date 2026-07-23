@@ -240,6 +240,13 @@ fn join_afs(dir: &str, name: &str) -> String {
 async fn export_tree(ws: &Workspace, afs_dir: &str, host_dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(host_dir).await?;
     for e in ws.ls(afs_dir).await? {
+        // Defense-in-depth: afs now rejects these names at the metadata boundary,
+        // but refuse to materialize a traversal/separator component here too, so a
+        // name planted by a direct object-store writer can't make `host_dir.join`
+        // escape the export root and write outside `lower/`.
+        if e.name.is_empty() || e.name == "." || e.name == ".." || e.name.contains('/') {
+            bail!("refusing to export unsafe path component {:?}", e.name);
+        }
         let child_afs = join_afs(afs_dir, &e.name);
         let child_host = host_dir.join(&e.name);
         match e.kind {

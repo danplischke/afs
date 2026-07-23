@@ -19,7 +19,7 @@
 use afs_core::LocalCasStore;
 use afs_sdk::{
     Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, EventSubscription,
-    Inode, Presence, S3Config as CoreS3Config, Suggestion, SuggestionStatus,
+    Inode, Presence, RebuildReport, S3Config as CoreS3Config, Suggestion, SuggestionStatus,
     Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
 };
 use pyo3::create_exception;
@@ -171,6 +171,21 @@ fn suggestion_dict(py: Python<'_>, s: &Suggestion) -> PyResult<Py<PyAny>> {
     d.set_item("created_ts", s.created_ts)?;
     d.set_item("resolved_ts", s.resolved_ts)?;
     d.set_item("resolved_by", s.resolved_by)?;
+    Ok(d.into_any().unbind())
+}
+
+fn rebuild_report_dict(py: Python<'_>, r: &RebuildReport) -> PyResult<Py<PyAny>> {
+    let d = PyDict::new(py);
+    d.set_item("objects_scanned", r.objects_scanned)?;
+    d.set_item("corrupt", r.corrupt)?;
+    d.set_item("commits_found", r.commits_found)?;
+    d.set_item("used_mirror", r.used_mirror)?;
+    // (name, commit_hex) pairs, one per recovered branch.
+    d.set_item("branches", r.branches.clone())?;
+    d.set_item("checked_out", r.checked_out.clone())?;
+    d.set_item("dirs", r.dirs)?;
+    d.set_item("files", r.files)?;
+    d.set_item("symlinks", r.symlinks)?;
     Ok(d.into_any().unbind())
 }
 
@@ -689,6 +704,31 @@ impl Workspace {
         future_into_py(py, async move {
             let b = ws.current_branch().await.map_err(to_pyerr)?;
             Ok(b)
+        })
+    }
+
+    /// Rebuild refs + the working tree from the content store's object graph, for
+    /// disaster recovery after the metadata DB is lost. Open a workspace with a
+    /// FRESH metadata DB pointed at the surviving content store (same S3/dir),
+    /// then call this: it recovers committed files, directories, symlinks, and
+    /// branch names/tips. Returns a report dict. Blame/attribution and
+    /// uncommitted edits are NOT recovered (they live only in the DB).
+    fn rebuild<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let report = ws.rebuild().await.map_err(to_pyerr)?;
+            Python::attach(|py| rebuild_report_dict(py, &report))
+        })
+    }
+
+    /// Read-only companion to `rebuild`: report what a rebuild would recover
+    /// (commits, branches, the branch that would be checked out) without
+    /// modifying the workspace.
+    fn scan<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let report = ws.scan().await.map_err(to_pyerr)?;
+            Python::attach(|py| rebuild_report_dict(py, &report))
         })
     }
 

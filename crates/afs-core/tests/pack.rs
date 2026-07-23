@@ -158,8 +158,10 @@ async fn engine_writes_land_in_packs() {
 
     // The workspace round-trips...
     assert_eq!(&fs.read("/big.bin").await.unwrap()[..], &big[..]);
-    // ...and the many logical objects (chunks + manifest + tree + commit) live
-    // in far fewer physical pack objects.
+    // ...and the many logical objects (chunks + manifest + tree + commit, plus
+    // the ref-mirror snapshot the commit seals for recovery) live in far fewer
+    // physical pack objects. (Per-commit mirror packs are later coalesced by
+    // `repack`.)
     assert!(
         data.len() < index.len(),
         "packs {} should be far fewer than objects {}",
@@ -167,5 +169,5 @@ async fn engine_writes_land_in_packs() {
         index.len()
     );
     assert!(index.len() > 8, "the big file produced many chunks");
-    assert!(data.len() <= 2, "they packed into a handful of objects: {}", data.len());
+    assert!(data.len() <= 3, "they packed into a handful of objects: {}", data.len());
 }

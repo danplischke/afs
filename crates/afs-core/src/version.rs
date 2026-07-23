@@ -13,7 +13,8 @@ use crate::engine::Fs;
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::objectgraph::{
-    Commit, CommitInfo, DiffEntry, DiffStatus, Tree, TreeEntry, TreeKind, VersioningMode,
+    Commit, CommitInfo, DiffEntry, DiffStatus, RefSnapshot, Tree, TreeEntry, TreeKind,
+    VersioningMode,
 };
 use crate::types::{FileKind, Hash, INO_ROOT, Ino, InodeInit};
 use crate::util::now_secs;
@@ -22,6 +23,10 @@ use std::collections::BTreeMap;
 
 const HEAD: &str = "HEAD";
 const DEFAULT_BRANCH: &str = "main";
+/// Config key: hex address of the live ref-mirror snapshot (a GC root).
+const REFS_MIRROR_HASH: &str = "refs_mirror";
+/// Config key: monotonic generation of the last ref-mirror snapshot written.
+const REFS_MIRROR_GEN: &str = "refs_mirror_gen";
 
 impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Ensure HEAD and the default versioning mode exist (called by `init`).
@@ -60,6 +65,50 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             ));
         }
         Ok(())
+    }
+
+    /// Mirror the whole ref table into the content store as a [`RefSnapshot`], so
+    /// branch names + tips can be recovered from the bucket alone if the metadata
+    /// DB is lost (see [`Self::rebuild_from_content`]). Called after every
+    /// ref-advancing operation. Cheap — one small object — and errors propagate,
+    /// so a mirror is never silently skipped.
+    ///
+    /// The generation is bumped and persisted *before* the object is written, so
+    /// it is strictly monotonic even if a crash interleaves; the live snapshot's
+    /// hash is then recorded in `config` so GC keeps exactly it and reaps
+    /// superseded snapshots.
+    pub(crate) async fn mirror_refs(&self) -> Result<()> {
+        let generation = self
+            .meta
+            .get_config(REFS_MIRROR_GEN)
+            .await?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+            + 1;
+        self.meta
+            .set_config(REFS_MIRROR_GEN, &generation.to_string())
+            .await?;
+        let refs = self.meta.list_refs().await?;
+        let hash = self
+            .content
+            .put(&RefSnapshot { generation, refs }.encode())
+            .await?;
+        // Persist the object before any metadata references it (same barrier a
+        // commit uses), then point `config` at the new live snapshot.
+        self.content.flush().await?;
+        self.meta
+            .set_config(REFS_MIRROR_HASH, &hash.to_hex())
+            .await?;
+        Ok(())
+    }
+
+    /// The hash of the live ref-mirror snapshot, if any (a GC root).
+    pub(crate) async fn refs_mirror_hash(&self) -> Result<Option<Hash>> {
+        Ok(self
+            .meta
+            .get_config(REFS_MIRROR_HASH)
+            .await?
+            .and_then(|s| Hash::from_hex(&s)))
     }
 
     /// The current branch name (from HEAD), or `None` if HEAD is detached.
@@ -136,6 +185,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             self.meta.delete_ref("MERGE_HEAD").await?;
             self.meta.clear_conflicts().await?;
         }
+        self.mirror_refs().await?;
         Ok(commit_hash)
     }
 
@@ -186,6 +236,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if !self.meta.cas_ref(name, None, &head.to_hex()).await? {
             return Err(AfsError::AlreadyExists(format!("branch {name}")));
         }
+        self.mirror_refs().await?;
         Ok(())
     }
 
@@ -218,6 +269,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         self.meta.truncate_tree().await?;
         self.materialize_into(commit.tree, INO_ROOT).await?;
         self.meta.set_ref(HEAD, &format!("ref:{branch}")).await?;
+        self.mirror_refs().await?;
         Ok(())
     }
 

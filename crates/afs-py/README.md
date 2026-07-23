@@ -122,6 +122,25 @@ nfs = asyncio.create_task(ws.serve_nfs("127.0.0.1:11111"))  # runs until cancell
 nfs.cancel()
 ```
 
+## Recover from the content store (if the DB is lost)
+
+Your files live in the content store as a self-describing graph; the metadata DB
+holds refs + attribution. If the DB is lost, point a **fresh** one at the same
+content store and rebuild — committed files, directories, and branch names come
+back (blame/attribution and uncommitted edits don't; they're DB-only):
+
+```python
+# same S3/dir as before, brand-new metadata DB:
+ws = await afs.Workspace.open_pg_s3(new_dsn, cfg)      # or open_local(new_db, cas)
+info = await ws.scan()                                  # read-only: what's recoverable
+#   {"commits_found": 12, "used_mirror": True, "branches": [("main", "…"), …], …}
+report = await ws.rebuild()                             # restores refs + working tree
+#   {"files": 340, "dirs": 27, "checked_out": "main", "used_mirror": True, …}
+```
+
+Reading every object also integrity-checks it (`report["corrupt"]` counts any that
+failed). The DB stays the thing to back up — so also run Postgres PITR / a replica.
+
 ## Examples
 
 - **`examples/collab_app.py`** — the one to start from. A complete little
@@ -141,7 +160,8 @@ nfs.cancel()
 `read` · `write` ·
 `write_as` · `mkdir_p` · `ls` · `stat` · `remove` · `rename` · `commit` · `log` ·
 `status` · `diff` · `diff_file` · `create_branch` · `checkout` · `branches` ·
-`current_branch` · `create_human` · `create_agent` · `actor_by_subject` · `find_or_create_human` ·
+`current_branch` · `rebuild` · `scan` ·
+`create_human` · `create_agent` · `actor_by_subject` · `find_or_create_human` ·
 `find_or_create_agent` · `create_session` · `blame` ·
 `watch` · `subscribe` · `presence` · `touch` · `suggest` · `suggest_delete` ·
 `list_suggestions` ·

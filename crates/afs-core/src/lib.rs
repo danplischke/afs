@@ -24,6 +24,7 @@ pub mod objectgraph;
 pub mod objectstore;
 pub mod pack;
 pub mod postgres;
+pub mod recover;
 pub mod sqlite;
 pub mod suggest;
 pub mod types;
@@ -42,11 +43,13 @@ pub use gc::GcStats;
 pub use merge::{Conflict, MergeOutcome};
 pub use metadata::{MetaTxn, MetadataStore};
 pub use objectgraph::{
-    Commit, CommitInfo, DiffEntry, DiffStatus, Tree, TreeEntry, TreeKind, VersioningMode,
+    Commit, CommitInfo, DiffEntry, DiffStatus, RefSnapshot, Tree, TreeEntry, TreeKind,
+    VersioningMode,
 };
 pub use objectstore::{ObjectContentStore, S3Config};
 pub use pack::{PackStore, DEFAULT_PACK_SIZE};
 pub use postgres::{EventSubscription, PostgresMetadataStore};
+pub use recover::RebuildReport;
 pub use sqlite::SqliteMetadataStore;
 pub use suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 pub use types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};

@@ -266,6 +266,12 @@ under failure is a first-class concern:
   land in one transaction — or none of them do.
 - **Blame can't lie.** Authorship is tied to content, so it can never drift out
   of sync with the file it annotates (see [Know who did what](#know-who-did-what)).
+- **The bucket can rebuild the database.** Content is stored as a self-describing
+  git-style graph (commit → tree → file manifest → chunks), and the branch table
+  is mirrored alongside it, so if the metadata DB is lost you can point a fresh one
+  at the surviving object store and `afs fsck --rebuild` to recover every committed
+  file, directory, and branch — chunking and all. (Blame and the audit log live
+  only in the DB, so back that up — Postgres PITR or SQLite replication.)
 
 ## Storage backends
 

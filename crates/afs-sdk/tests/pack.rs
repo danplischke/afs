@@ -54,7 +54,9 @@ async fn packed_workspace_roundtrips_and_batches() {
     let entries = count_objects(&index);
     assert!(entries > 8, "big file yielded many chunks: {entries}");
     assert!(packs < entries, "packs {packs} << index entries {entries}");
-    assert!(packs <= 3, "only a handful of pack objects: {packs}");
+    // A handful of packs: the file's chunks + the commit, plus the small pack the
+    // commit seals for its ref-mirror snapshot (coalesced later by `repack`).
+    assert!(packs <= 4, "only a handful of pack objects: {packs}");
 }
 
 #[tokio::test]

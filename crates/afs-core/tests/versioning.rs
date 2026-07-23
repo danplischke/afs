@@ -147,9 +147,14 @@ async fn identical_tree_dedups_across_commits() {
     fs.write("/a", b"same").await.unwrap();
     fs.commit("a", "v1").await.unwrap();
     let n = store.len();
-    // A no-op commit reuses the tree + blobs; only a new commit object is added.
+    // A no-op commit reuses the tree + blobs; only the new commit object and the
+    // ref-mirror snapshot it writes (branch tip moved) are added.
     fs.commit("a", "v2 (no changes)").await.unwrap();
-    assert_eq!(store.len(), n + 1, "only the new commit object is stored");
+    assert_eq!(
+        store.len(),
+        n + 2,
+        "only the new commit object + its ref-mirror snapshot are stored"
+    );
 }
 
 #[tokio::test]

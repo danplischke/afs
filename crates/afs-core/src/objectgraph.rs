@@ -13,6 +13,7 @@ use crate::types::Hash;
 
 const TREE_MAGIC: &[u8; 5] = b"AFST\x01";
 const COMMIT_MAGIC: &[u8; 5] = b"AFSC\x01";
+const REFS_MAGIC: &[u8; 5] = b"AFSR\x01";
 
 /// The kind of a tree entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +192,74 @@ impl Commit {
 pub struct CommitInfo {
     pub hash: Hash,
     pub commit: Commit,
+}
+
+/// A mirror of the whole ref table (branches, tags, HEAD) written into the
+/// [`ContentStore`] alongside the object graph, so a bare content store can
+/// recover its branch names and tips without the metadata DB (`docs/DESIGN.md`
+/// §7). Refs otherwise live only in the DB, which is the fragile part of a
+/// recovery story; mirroring closes that gap.
+///
+/// `generation` is a monotonic counter stamped from the DB at write time, so a
+/// recovery scan that finds several snapshots (those written since the last GC)
+/// can pick the newest unambiguously.
+///
+/// [`ContentStore`]: crate::ContentStore
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RefSnapshot {
+    pub generation: u64,
+    /// `(name, value)` for every ref: a branch/tag maps to a commit hex, `HEAD`
+    /// maps to `ref:<branch>` (or a commit hex when detached).
+    pub refs: Vec<(String, String)>,
+}
+
+impl RefSnapshot {
+    /// `magic | generation(u64) | count(u32) | [ name_len(u16) | name | val_len(u32) | val ]*`
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(REFS_MAGIC);
+        out.extend_from_slice(&self.generation.to_le_bytes());
+        out.extend_from_slice(&(self.refs.len() as u32).to_le_bytes());
+        for (name, value) in &self.refs {
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            out.extend_from_slice(value.as_bytes());
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<RefSnapshot> {
+        let bad = || AfsError::Content("malformed ref snapshot".to_string());
+        if bytes.len() < 17 || &bytes[0..5] != REFS_MAGIC {
+            return Err(bad());
+        }
+        let generation = u64::from_le_bytes(bytes[5..13].try_into().map_err(|_| bad())?);
+        let count = u32::from_le_bytes(bytes[13..17].try_into().map_err(|_| bad())?) as usize;
+        let mut refs = Vec::with_capacity(count);
+        let mut off = 17;
+        for _ in 0..count {
+            if off + 2 > bytes.len() {
+                return Err(bad());
+            }
+            let nlen = u16::from_le_bytes(bytes[off..off + 2].try_into().map_err(|_| bad())?) as usize;
+            off += 2;
+            if off + nlen + 4 > bytes.len() {
+                return Err(bad());
+            }
+            let name = String::from_utf8(bytes[off..off + nlen].to_vec()).map_err(|_| bad())?;
+            off += nlen;
+            let vlen = u32::from_le_bytes(bytes[off..off + 4].try_into().map_err(|_| bad())?) as usize;
+            off += 4;
+            if off + vlen > bytes.len() {
+                return Err(bad());
+            }
+            let value = String::from_utf8(bytes[off..off + vlen].to_vec()).map_err(|_| bad())?;
+            off += vlen;
+            refs.push((name, value));
+        }
+        Ok(RefSnapshot { generation, refs })
+    }
 }
 
 /// Versioning mode for a workspace (`docs/DESIGN.md` §4c).

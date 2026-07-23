@@ -207,6 +207,16 @@ enum Cmd {
     },
     /// Reclaim content unreachable from any branch or the working tree.
     Gc,
+    /// Recover a workspace from the content store after a metadata-DB loss.
+    /// Scans the object graph (commits, trees, chunks, the ref mirror) and, with
+    /// `--rebuild`, restores refs + the working tree onto a fresh DB. Read-only
+    /// without `--rebuild`. Does not recover blame/attribution (DB-only).
+    Fsck {
+        /// Rebuild the metadata DB (refs + working tree) from content, instead of
+        /// only reporting what would be recovered.
+        #[arg(long)]
+        rebuild: bool,
+    },
     /// Tail the change feed (who changed what). `--follow` polls for new events.
     Watch {
         /// Only show events after this seq cursor.
@@ -673,6 +683,52 @@ async fn main() -> Result<()> {
                 "gc: kept {} object(s), deleted {} ({} bytes freed)",
                 stats.reachable, stats.deleted, stats.bytes_freed
             );
+        }
+        Cmd::Fsck { rebuild } => {
+            let report = if rebuild {
+                ws.rebuild().await?
+            } else {
+                ws.scan().await?
+            };
+            let corrupt = if report.corrupt > 0 {
+                format!(", {} corrupt", report.corrupt)
+            } else {
+                String::new()
+            };
+            println!(
+                "fsck: scanned {} object(s){corrupt}, found {} commit(s)",
+                report.objects_scanned, report.commits_found
+            );
+            if report.branches.is_empty() {
+                println!("  no commits to recover (empty or non-versioned workspace)");
+            } else {
+                let src = if report.used_mirror {
+                    "ref mirror"
+                } else {
+                    "inferred heads"
+                };
+                println!("  {} branch(es) via {src}:", report.branches.len());
+                for (name, hex) in &report.branches {
+                    let tip = &hex[..hex.len().min(12)];
+                    let head = if report.checked_out.as_deref() == Some(name) {
+                        "  (HEAD)"
+                    } else {
+                        ""
+                    };
+                    println!("    {name}\t{tip}{head}");
+                }
+            }
+            if rebuild {
+                if let Some(branch) = &report.checked_out {
+                    println!(
+                        "  rebuilt working tree @ {branch}: {} dir(s), {} file(s), {} symlink(s)",
+                        report.dirs, report.files, report.symlinks
+                    );
+                }
+                println!("  note: blame/attribution is not recoverable (DB-only)");
+            } else {
+                println!("  (dry run — pass --rebuild to restore the metadata DB)");
+            }
         }
         Cmd::Watch { since, follow } => {
             let mut cursor = since;

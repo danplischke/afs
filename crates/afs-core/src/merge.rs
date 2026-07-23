@@ -158,6 +158,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             }
             self.meta.truncate_tree().await?;
             self.materialize_into(theirs_commit.tree, INO_ROOT).await?;
+            self.mirror_refs().await?;
             return Ok(MergeOutcome::FastForward(theirs));
         }
 
@@ -203,6 +204,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             }
             self.meta.truncate_tree().await?;
             self.materialize_into(merged_tree, INO_ROOT).await?;
+            self.mirror_refs().await?;
             Ok(MergeOutcome::Merged(commit_hash))
         } else {
             // Conflicts: reflect the merge (with markers) and record MERGE_HEAD;
@@ -214,6 +216,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 self.meta.set_conflict(&c.path, &c.kind).await?;
             }
             self.meta.set_ref(MERGE_HEAD, &theirs.to_hex()).await?;
+            self.mirror_refs().await?;
             Ok(MergeOutcome::Conflicts(conflicts))
         }
     }

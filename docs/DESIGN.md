@@ -507,6 +507,15 @@ ranges with zero manual bookkeeping.
   past the grace period is swept. New chunks written during a sweep are pinned by an in-progress-write table.
 - **Immutable objects vs mutable inodes:** resolved by the index/working-tree materialization (§3) — mutation
   lives in the working tree, immutability in the object store, commit is the bridge.
+- **Metadata-DB loss (recovery):** the content store already holds a self-describing Merkle DAG
+  (commit→tree→blob-manifest→chunks), so committed files, directories, and their names are reconstructable from
+  the bucket alone — chunking is transparent because a file's manifest object lists its ordered chunks. The one
+  thing the graph lacks is the mutable ref table, which otherwise lives only in the DB; we mirror it into the
+  store as a `RefSnapshot` object on every ref change (kept as a GC root; superseded snapshots are reclaimed).
+  `afs fsck [--rebuild]` (SDK `Workspace::rebuild`/`scan`) scans the store, recovers branch names + tips from the
+  mirror — or by inferring heads if none exists — and materializes the working tree onto a fresh DB. Attribution
+  (blame/audit/actors) and uncommitted edits are **not** recoverable: they live only in the DB, so it remains the
+  component to back up (Postgres PITR/replica; SQLite continuous replication).
 
 ---
 

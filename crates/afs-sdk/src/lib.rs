@@ -15,9 +15,9 @@ use std::sync::Arc;
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, EventSubscription, FileKind, GcStats, Hash,
-    Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence, S3Config, Suggestion,
-    SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit, VerifyingStore, VersioningMode,
-    WriteCtx,
+    Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence, RebuildReport, S3Config,
+    Suggestion, SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit, VerifyingStore,
+    VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -318,6 +318,26 @@ impl Workspace {
     /// working tree. Run when the workspace is idle.
     pub async fn gc(&self) -> Result<GcStats> {
         self.fs.gc().await
+    }
+
+    /// Rebuild refs and the working tree from the content store's object graph,
+    /// for disaster recovery after the metadata DB is lost. Open a workspace with
+    /// a **fresh** metadata DB pointed at the surviving content store, then call
+    /// this: it scans the store, recovers branch names + tips (from the ref
+    /// mirror, or by inferring heads), and materializes the checked-out tree.
+    ///
+    /// Recovers committed files, directories, symlinks, and branches — **not**
+    /// attribution (blame/audit/actors) or uncommitted edits, which live only in
+    /// the DB. Reading every object also integrity-checks it.
+    pub async fn rebuild(&self) -> Result<RebuildReport> {
+        self.fs.rebuild_from_content().await
+    }
+
+    /// Read-only companion to [`Self::rebuild`]: scan the content store and
+    /// report what a rebuild would recover (commits, branches, the branch that
+    /// would be checked out), without modifying the workspace.
+    pub async fn scan(&self) -> Result<RebuildReport> {
+        self.fs.scan_content().await
     }
 
     /// Seal any buffered writes to durable storage (a no-op unless the content

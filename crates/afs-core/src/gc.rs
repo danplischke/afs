@@ -72,6 +72,13 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             }
         }
 
+        // Root 4: the live ref-mirror snapshot (recovery aid; see `mirror_refs`).
+        // Only the current one is kept — superseded snapshots are unreferenced
+        // here and get reclaimed, so mirrors never accumulate.
+        if let Some(h) = self.refs_mirror_hash().await? {
+            marked.insert(h);
+        }
+
         // Sweep: delete everything not marked.
         let mut stats = GcStats {
             reachable: marked.len(),

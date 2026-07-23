@@ -91,9 +91,11 @@ version = "0.0.0"
 dependencies = [
  "afs-core",
  "afs-sdk",
+ "anyhow",
  "async-recursion",
  "flate2",
  "hex",
+ "libc",
  "sha1",
  "sha2 0.10.9",
  "tempfile",
@@ -133,18 +135,6 @@ dependencies = [
  "fuser",
  "pyo3",
  "pyo3-async-runtimes",
- "tokio",
-]
-
-[[package]]
-name = "afs-remote-git"
-version = "0.0.0"
-dependencies = [
- "afs-git",
- "afs-sdk",
- "anyhow",
- "libc",
- "tempfile",
  "tokio",
 ]
 

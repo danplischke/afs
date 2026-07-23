@@ -6,6 +6,13 @@ license.workspace = true
 repository.workspace = true
 description.workspace = true
 
+# git invokes a helper named exactly `git-remote-<transport>` off PATH; the
+# `git-remote-afs` binary lives here alongside the git object/import/export code
+# it drives (it was formerly the standalone `afs-remote-git` crate).
+[[bin]]
+name = "git-remote-afs"
+path = "src/bin/git-remote-afs.rs"
+
 [dependencies]
 afs-core = { version = "0.1.0", path = "../afs-core" }
 afs-sdk = { version = "0.1.0", path = "../afs-sdk" }
@@ -14,6 +21,10 @@ flate2 = "1.0.35"
 sha1 = "0.10.6"
 sha2 = "0.10.9"
 hex = "0.4.3"
+# used by the git-remote-afs binary
+anyhow = "1.0.104"
+libc = "0.2.176"
+tokio = { version = "1.53.1", features = ["rt", "macros"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

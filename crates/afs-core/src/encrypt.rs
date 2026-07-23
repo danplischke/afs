@@ -93,6 +93,21 @@ impl ContentStore for EncryptedStore {
     }
 
     async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        // The nonce is derived from `key` (so reads can re-derive it), which is
+        // only safe when a key maps to exactly one plaintext — i.e. content
+        // addressing, `key == Hash::of(bytes)`. Storing two different plaintexts
+        // under the same key would reuse an (key, nonce) pair, breaking the AEAD.
+        // Reject any non-content-addressed key so a mutable-value keyed store
+        // (e.g. a `PackStore` index, whose entry for a chunk changes on repack)
+        // can't be wrapped in encryption and silently made insecure.
+        if key != &Hash::of(bytes) {
+            return Err(AfsError::Content(
+                "EncryptedStore::put_keyed requires a content-addressed key \
+                 (key == hash of bytes); wrapping a non-content-addressed keyed \
+                 store in encryption would reuse an AEAD nonce"
+                    .into(),
+            ));
+        }
         let ciphertext = self.encrypt(key, bytes)?;
         self.inner.put_keyed(key, &ciphertext).await
     }

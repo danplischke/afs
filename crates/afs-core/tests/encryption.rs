@@ -114,3 +114,24 @@ async fn on_disk_local_store_is_encrypted() {
     assert!(!raw.windows(plaintext.len()).any(|w| w == plaintext));
     assert_eq!(&enc.get(&hash).await.unwrap()[..], &plaintext[..]);
 }
+
+// SEC (security audit #19): EncryptedStore::put_keyed must refuse a
+// non-content-addressed key. The nonce is derived from the key, so storing two
+// distinct plaintexts under one key would reuse an AEAD (key, nonce) pair — this
+// guard makes it impossible to wrap a mutable-value keyed store (e.g. a pack
+// index, whose entry for a chunk changes on repack) in encryption unsafely.
+#[tokio::test]
+async fn put_keyed_rejects_a_non_content_addressed_key() {
+    let backend = Arc::new(MemStore::new());
+    let enc = EncryptedStore::new(backend, key(9));
+
+    let bytes = b"index-entry-v1";
+    // The content-addressed key (the hash of the bytes) is accepted...
+    enc.put_keyed(&Hash::of(bytes), bytes).await.unwrap();
+    // ...but a key that isn't the hash of the bytes is refused.
+    let wrong = Hash::of(b"a-different-key");
+    assert!(
+        enc.put_keyed(&wrong, bytes).await.is_err(),
+        "a non-content-addressed key must be rejected (nonce reuse)"
+    );
+}

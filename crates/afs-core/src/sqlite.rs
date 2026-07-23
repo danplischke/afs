@@ -8,10 +8,10 @@
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
 use crate::collab::{Event, EventInit, Presence};
-use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::migrations::MIGRATIONS;
+use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};
 use crate::util::now_secs;
 use async_trait::async_trait;
@@ -37,7 +37,11 @@ impl SqliteMetadataStore {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // `busy_timeout` so a second process/writer waits for the lock instead of
+        // failing instantly with `SQLITE_BUSY` ("database is locked").
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -53,9 +57,11 @@ impl SqliteMetadataStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn
-            .lock()
-            .expect("afs sqlite connection mutex poisoned")
+        // Recover from poisoning rather than propagating it: a panic while some
+        // other operation held the lock must not make every subsequent metadata
+        // call panic for the life of the process. The connection is still a valid
+        // handle; the poisoned in-flight statement simply rolls back.
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -84,10 +90,16 @@ fn build_inode(row: (i64, String, i64, i64, i64, Option<String>, i64, i64)) -> R
     })
 }
 
+/// True if a DDL error is SQLite's "duplicate column name" — i.e. an
+/// `ADD COLUMN` migration re-applied to a table that already has the column.
+fn is_duplicate_column(e: &rusqlite::Error) -> bool {
+    e.to_string().contains("duplicate column name")
+}
+
 #[async_trait]
 impl MetadataStore for SqliteMetadataStore {
     async fn init(&self) -> Result<()> {
-        let conn = self.lock();
+        let mut conn = self.lock();
         let now = now_secs();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_meta(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
@@ -101,13 +113,26 @@ impl MetadataStore for SqliteMetadataStore {
                 )
                 .optional()?
                 .is_some();
-            if !applied {
-                conn.execute_batch(m.sqlite)?;
-                conn.execute(
-                    "INSERT INTO schema_meta(version, applied_at) VALUES (?1, ?2)",
-                    params![m.version, now],
-                )?;
+            if applied {
+                continue;
             }
+            // Apply the DDL and record the version in ONE transaction, so a crash
+            // can never leave a migration half-applied (its bookkeeping absent),
+            // which would brick the next `init` on a non-idempotent step.
+            let tx = conn.transaction()?;
+            match tx.execute_batch(m.sqlite) {
+                Ok(()) => {}
+                // Idempotency for a re-applied `ADD COLUMN` (SQLite lacks
+                // `IF NOT EXISTS`): the column is already present, so the schema
+                // is correct — record the version and continue.
+                Err(e) if is_duplicate_column(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+            tx.execute(
+                "INSERT INTO schema_meta(version, applied_at) VALUES (?1, ?2)",
+                params![m.version, now],
+            )?;
+            tx.commit()?;
         }
         conn.execute(
             "INSERT OR IGNORE INTO inode(ino, kind, mode, nlink, size, content_hash, mtime, ctime)
@@ -654,6 +679,15 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(out)
     }
 
+    async fn reap_presence(&self, older_than: i64) -> Result<u64> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "DELETE FROM presence WHERE last_seen < ?1",
+            params![older_than],
+        )?;
+        Ok(n as u64)
+    }
+
     async fn create_suggestion(&self, init: SuggestionInit, ts: i64) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
@@ -745,4 +779,75 @@ fn row_to_suggestion(r: &rusqlite::Row) -> rusqlite::Result<Suggestion> {
         resolved_ts: r.get(10)?,
         resolved_by: r.get(11)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FileKind, InodeInit};
+
+    // M4: a panic while another operation held the lock must not poison the
+    // store for the rest of the process.
+    #[tokio::test]
+    async fn recovers_from_a_poisoned_lock() {
+        let store = SqliteMetadataStore::open_in_memory().unwrap();
+        store.init().await.unwrap();
+        let conn = store.conn.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = conn.lock().unwrap();
+            panic!("poison the mutex on purpose");
+        })
+        .join();
+        // Poisoned mutex recovered, not propagated: the store still works.
+        assert!(store.get_inode(1).await.unwrap().is_some());
+    }
+
+    // H8: `busy_timeout` is configured so a second writer waits instead of
+    // failing instantly with SQLITE_BUSY.
+    #[tokio::test]
+    async fn busy_timeout_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(dir.path().join("m.db")).unwrap();
+        let timeout: i64 = store
+            .lock()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000);
+    }
+
+    // H9: a re-applied non-idempotent migration (V6's ADD COLUMN) must not brick
+    // `init`. Simulate a crash that applied the DDL but not its bookkeeping.
+    #[tokio::test]
+    async fn init_recovers_from_a_reapplied_add_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.db");
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        store.init().await.unwrap();
+        // Drop V6's bookkeeping so the runner re-applies its `ADD COLUMN`.
+        store
+            .lock()
+            .execute("DELETE FROM schema_meta WHERE version = 6", [])
+            .unwrap();
+
+        // Must NOT fail with "duplicate column name: branch".
+        store.init().await.unwrap();
+
+        let has_branch: i64 = store
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('fs_event') WHERE name = 'branch'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_branch, 1);
+        // and normal operations still work
+        store
+            .create_inode(InodeInit {
+                kind: FileKind::File,
+                mode: 0o100644,
+            })
+            .await
+            .unwrap();
+    }
 }

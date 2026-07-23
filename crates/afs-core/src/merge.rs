@@ -8,7 +8,7 @@
 //! set `MERGE_HEAD` — the next `commit` picks up the second parent and clears the
 //! merge state.
 
-use crate::chunk::{ChunkRef, Manifest};
+use crate::chunk::Manifest;
 use crate::content::ContentStore;
 use crate::engine::Fs;
 use crate::error::{AfsError, Result};
@@ -144,9 +144,18 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         }
         if self.is_ancestor(ours, theirs).await? {
             let theirs_commit = self.commit_at(&theirs).await?;
-            self.meta
+            // Advance the ref FIRST (checked): if the branch moved concurrently
+            // the CAS fails and we abort *before* clobbering the working tree,
+            // rather than silently overwriting it and reporting success.
+            let swapped = self
+                .meta
                 .cas_ref(&branch, Some(&ours.to_hex()), &theirs.to_hex())
                 .await?;
+            if !swapped {
+                return Err(AfsError::Conflict(format!(
+                    "branch {branch} moved concurrently; retry the merge"
+                )));
+            }
             self.meta.truncate_tree().await?;
             self.materialize_into(theirs_commit.tree, INO_ROOT).await?;
             return Ok(MergeOutcome::FastForward(theirs));
@@ -171,10 +180,6 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             )
             .await?;
 
-        // Reflect the merge in the working tree.
-        self.meta.truncate_tree().await?;
-        self.materialize_into(merged_tree, INO_ROOT).await?;
-
         if conflicts.is_empty() {
             let commit = Commit {
                 tree: merged_tree,
@@ -184,11 +189,26 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 timestamp: now_secs(),
             };
             let commit_hash = self.content.put(&commit.encode()).await?;
-            self.meta
+            // Advance the ref FIRST (checked), then reflect it in the working
+            // tree — so a concurrent branch move aborts the merge before we
+            // overwrite the working tree or drop `theirs` from history.
+            let swapped = self
+                .meta
                 .cas_ref(&branch, Some(&ours.to_hex()), &commit_hash.to_hex())
                 .await?;
+            if !swapped {
+                return Err(AfsError::Conflict(format!(
+                    "branch {branch} moved concurrently; retry the merge"
+                )));
+            }
+            self.meta.truncate_tree().await?;
+            self.materialize_into(merged_tree, INO_ROOT).await?;
             Ok(MergeOutcome::Merged(commit_hash))
         } else {
+            // Conflicts: reflect the merge (with markers) and record MERGE_HEAD;
+            // the ref intentionally does NOT advance until the user commits.
+            self.meta.truncate_tree().await?;
+            self.materialize_into(merged_tree, INO_ROOT).await?;
             self.meta.clear_conflicts().await?;
             for c in &conflicts {
                 self.meta.set_conflict(&c.path, &c.kind).await?;
@@ -342,56 +362,41 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             });
         }
 
-        // Binary: merge the sequence of chunk hashes (chunk-granular).
-        let om = self.load_manifest(&ours).await?;
-        let tm = self.load_manifest(&theirs).await?;
-        let bm = match base {
-            Some(h) => self.load_manifest(&h).await?,
-            None => Manifest::default(),
-        };
-        let mut lens: HashMap<Hash, u32> = HashMap::new();
-        for c in om
-            .chunks
-            .iter()
-            .chain(tm.chunks.iter())
-            .chain(bm.chunks.iter())
-        {
-            lens.insert(c.hash, c.len);
-        }
-        let seq = |m: &Manifest| {
-            m.chunks
-                .iter()
-                .map(|c| c.hash.to_hex())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        match diffy::merge(&seq(&bm), &seq(&om), &seq(&tm)) {
-            Ok(merged) => {
-                let mut chunks = Vec::new();
-                let mut size = 0u64;
-                for line in merged.lines().filter(|l| !l.is_empty()) {
-                    let hash = Hash::from_hex(line)
-                        .ok_or_else(|| AfsError::Content("bad chunk hash in merge".into()))?;
-                    let len = *lens
-                        .get(&hash)
-                        .ok_or_else(|| AfsError::Content("unknown chunk in merge".into()))?;
-                    size += len as u64;
-                    chunks.push(ChunkRef { hash, len });
-                }
-                let manifest = Manifest { size, chunks };
-                Ok(FileMerge {
-                    hash: self.content.put(&manifest.encode()).await?,
-                    conflict: false,
-                    theirs_sibling: None,
-                })
-            }
-            // Overlapping binary edits: keep ours, surface theirs as a sibling.
-            Err(_) => Ok(FileMerge {
+        // Binary: content is addressed by hash, so equality is a 32-byte compare.
+        // We do NOT diff3 the chunk-hash sequence — that line-merges hash-lines
+        // and silently corrupts binaries with repeated chunks (padding/sparse),
+        // producing a self-consistent but wrong manifest with `conflict=false`.
+        // Only the trivially-clean cases auto-resolve; any real divergence is a
+        // conflict (keep ours, surface theirs as a `.theirs` sibling).
+        if ours == theirs {
+            return Ok(FileMerge {
                 hash: ours,
-                conflict: true,
-                theirs_sibling: Some(theirs),
-            }),
+                conflict: false,
+                theirs_sibling: None,
+            });
         }
+        if base == Some(ours) {
+            // ours is unchanged since base → take theirs.
+            return Ok(FileMerge {
+                hash: theirs,
+                conflict: false,
+                theirs_sibling: None,
+            });
+        }
+        if base == Some(theirs) {
+            // theirs is unchanged since base → keep ours.
+            return Ok(FileMerge {
+                hash: ours,
+                conflict: false,
+                theirs_sibling: None,
+            });
+        }
+        // Both sides diverged from base (or no common base): a real conflict.
+        Ok(FileMerge {
+            hash: ours,
+            conflict: true,
+            theirs_sibling: Some(theirs),
+        })
     }
 
     // --- locks (git-LFS-style) -------------------------------------------

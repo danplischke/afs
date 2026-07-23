@@ -458,4 +458,11 @@ impl Workspace {
     pub async fn presence(&self, window_secs: i64) -> Result<Vec<Presence>> {
         self.fs.presence(window_secs).await
     }
+
+    /// Reap presence rows older than `grace_secs` (keeps the table bounded).
+    /// Call periodically with a grace comfortably larger than your presence
+    /// window. Returns the number of rows reaped.
+    pub async fn reap_presence(&self, grace_secs: i64) -> Result<u64> {
+        self.fs.reap_presence(grace_secs).await
+    }
 }

@@ -93,4 +93,11 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     pub async fn presence(&self, window_secs: i64) -> Result<Vec<Presence>> {
         self.meta.active_presence(now_secs() - window_secs).await
     }
+
+    /// Reap presence rows older than `grace_secs` so the table doesn't grow
+    /// without bound (one row accretes per session). Call periodically; use a
+    /// grace comfortably larger than the presence window. Returns rows reaped.
+    pub async fn reap_presence(&self, grace_secs: i64) -> Result<u64> {
+        self.meta.reap_presence(now_secs() - grace_secs).await
+    }
 }

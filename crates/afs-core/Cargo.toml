@@ -15,6 +15,10 @@ fastcdc = "3"
 futures = "0.3.33"
 hex = "0.4.3"
 object_store = { version = "0.12", features = ["aws"] }
+# `arc_lock` gives an owned (`'static`) connection guard a transaction can hold
+# across `.await`s; `send_guard` makes that guard `Send` so the transaction
+# future stays `Send`. Both are needed for the SQLite `MetaTxn` (C1).
+parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 similar = "3.1.1"
 thiserror = "2.0.19"

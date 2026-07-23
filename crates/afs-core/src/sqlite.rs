@@ -9,15 +9,16 @@
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
 use crate::collab::{Event, EventInit, Presence};
 use crate::error::{AfsError, Result};
-use crate::metadata::MetadataStore;
+use crate::metadata::{MetaTxn, MetadataStore};
 use crate::migrations::MIGRATIONS;
 use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};
 use crate::util::now_secs;
 use async_trait::async_trait;
+use parking_lot::{ArcMutexGuard, Mutex, MutexGuard, RawMutex};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const DIR_MODE: i64 = 0o040755;
 
@@ -56,12 +57,13 @@ impl SqliteMetadataStore {
         })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        // Recover from poisoning rather than propagating it: a panic while some
-        // other operation held the lock must not make every subsequent metadata
-        // call panic for the life of the process. The connection is still a valid
-        // handle; the poisoned in-flight statement simply rolls back.
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> MutexGuard<'_, Connection> {
+        // `parking_lot::Mutex` does not poison: a panic while another operation
+        // holds the lock simply releases it on unwind, so a single panicking
+        // statement can't brick every subsequent metadata call for the life of
+        // the process (M4). This also gives the owned, `Send` guard that a
+        // [`SqliteTxn`] holds across `.await`s (C1).
+        self.conn.lock()
     }
 }
 
@@ -140,6 +142,20 @@ impl MetadataStore for SqliteMetadataStore {
             params![INO_ROOT, DIR_MODE, now],
         )?;
         Ok(())
+    }
+
+    async fn begin(&self) -> Result<Box<dyn MetaTxn>> {
+        // Hold the connection lock for the whole transaction — SQLite is
+        // single-writer, so this both serializes writers and lets the txn issue
+        // its statements without another operation interleaving on the shared
+        // connection. `lock_arc` yields an owned, `Send` guard we can move into
+        // the returned box and hold across `.await`s.
+        let guard = self.conn.lock_arc();
+        // `BEGIN IMMEDIATE` takes the write lock now rather than lazily on the
+        // first write, so a second writer waits (up to `busy_timeout`) instead
+        // of failing partway through.
+        guard.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(Box::new(SqliteTxn { guard: Some(guard) }))
     }
 
     async fn get_inode(&self, ino: Ino) -> Result<Option<Inode>> {
@@ -763,6 +779,132 @@ impl MetadataStore for SqliteMetadataStore {
     }
 }
 
+/// A SQLite metadata transaction ([`MetadataStore::begin`]). Holds the shared
+/// connection's lock for its whole lifetime (SQLite is single-writer) and runs
+/// `BEGIN IMMEDIATE … COMMIT`. Dropped without [`commit`](MetaTxn::commit) — on
+/// an error path or a panic — it rolls back, so a half-applied multi-step write
+/// never reaches disk.
+struct SqliteTxn {
+    /// `Some` while the transaction is open; `commit`/`Drop` take it to close
+    /// exactly once. An *owned* `Arc` guard so it is `Send` and can be held
+    /// across the engine's `.await`s.
+    guard: Option<ArcMutexGuard<RawMutex, Connection>>,
+}
+
+impl SqliteTxn {
+    fn conn(&self) -> &Connection {
+        // Present until commit consumes the txn; callers never touch it after.
+        self.guard.as_deref().expect("transaction already finished")
+    }
+}
+
+#[async_trait]
+impl MetaTxn for SqliteTxn {
+    async fn create_inode(&mut self, init: InodeInit) -> Result<Ino> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO inode(kind, mode, nlink, size, content_hash, mtime, ctime)
+             VALUES (?1, ?2, 1, 0, NULL, ?3, ?3)",
+            params![init.kind.as_str(), init.mode as i64, now_secs()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn set_content(&mut self, ino: Ino, content: Option<Hash>, size: u64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE inode SET content_hash = ?1, size = ?2, mtime = ?3, ctime = ?3 WHERE ino = ?4",
+            params![content.map(|h| h.to_hex()), size as i64, now_secs(), ino],
+        )?;
+        Ok(())
+    }
+
+    async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE inode SET nlink = ?1 WHERE ino = ?2",
+            params![nlink, ino],
+        )?;
+        Ok(())
+    }
+
+    async fn delete_inode(&mut self, ino: Ino) -> Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM symlink WHERE ino = ?1", params![ino])?;
+        conn.execute("DELETE FROM inode WHERE ino = ?1", params![ino])?;
+        Ok(())
+    }
+
+    async fn add_dentry(&mut self, parent: Ino, name: &str, ino: Ino) -> Result<()> {
+        match self.conn().execute(
+            "INSERT INTO dentry(parent_ino, name, ino) VALUES (?1, ?2, ?3)",
+            params![parent, name, ino],
+        ) {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(AfsError::AlreadyExists(name.to_string()))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn remove_dentry(&mut self, parent: Ino, name: &str) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM dentry WHERE parent_ino = ?1 AND name = ?2",
+            params![parent, name],
+        )?;
+        Ok(())
+    }
+
+    async fn set_symlink(&mut self, ino: Ino, target: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO symlink(ino, target) VALUES (?1, ?2)
+             ON CONFLICT(ino) DO UPDATE SET target = excluded.target",
+            params![ino, target],
+        )?;
+        Ok(())
+    }
+
+    async fn set_line_blame(&mut self, ino: Ino, runs: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO line_blame(ino, runs) VALUES (?1, ?2)
+             ON CONFLICT(ino) DO UPDATE SET runs = excluded.runs",
+            params![ino, runs],
+        )?;
+        Ok(())
+    }
+
+    async fn append_edit_op(&mut self, op: EditOpInit) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO edit_op(session_id, actor_id, tool_call_id, ino, path, op, byte_start, byte_len, pre_hash, post_hash, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                op.session_id, op.actor_id, op.tool_call_id, op.ino, op.path, op.op,
+                op.byte_start, op.byte_len, op.pre_hash, op.post_hash, op.ts
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<()> {
+        let guard = self.guard.take().expect("transaction already finished");
+        guard.execute_batch("COMMIT")?;
+        Ok(())
+    }
+}
+
+impl Drop for SqliteTxn {
+    fn drop(&mut self) {
+        // Roll back unless `commit` already took the guard. Best-effort: if the
+        // ROLLBACK itself fails (a dying connection), there is nothing further
+        // to do — the transaction never committed, so nothing partial persists.
+        if let Some(guard) = self.guard.take() {
+            let _ = guard.execute_batch("ROLLBACK");
+        }
+    }
+}
+
 fn row_to_suggestion(r: &rusqlite::Row) -> rusqlite::Result<Suggestion> {
     let status: String = r.get(8)?;
     Ok(Suggestion {
@@ -786,19 +928,21 @@ mod tests {
     use super::*;
     use crate::types::{FileKind, InodeInit};
 
-    // M4: a panic while another operation held the lock must not poison the
-    // store for the rest of the process.
+    // M4: a panic while another operation holds the lock must not brick the
+    // store for the rest of the process. `parking_lot::Mutex` does not poison —
+    // the lock is released on unwind — so the store keeps working with no
+    // recovery dance (the property C1's owned guard also relies on).
     #[tokio::test]
-    async fn recovers_from_a_poisoned_lock() {
+    async fn a_panic_under_the_lock_does_not_brick_the_store() {
         let store = SqliteMetadataStore::open_in_memory().unwrap();
         store.init().await.unwrap();
         let conn = store.conn.clone();
         let _ = std::thread::spawn(move || {
-            let _g = conn.lock().unwrap();
-            panic!("poison the mutex on purpose");
+            let _g = conn.lock();
+            panic!("panic while holding the lock");
         })
         .join();
-        // Poisoned mutex recovered, not propagated: the store still works.
+        // The mutex was released on unwind, not poisoned: the store still works.
         assert!(store.get_inode(1).await.unwrap().is_some());
     }
 

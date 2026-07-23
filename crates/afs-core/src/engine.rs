@@ -8,7 +8,7 @@
 use crate::chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest, chunk_bounds};
 use crate::content::ContentStore;
 use crate::error::{AfsError, Result};
-use crate::metadata::MetadataStore;
+use crate::metadata::{MetaTxn, MetadataStore};
 use crate::types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};
 use bytes::{Bytes, BytesMut};
 
@@ -99,14 +99,17 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(path.to_string()));
         }
-        let ino = self
-            .meta
+        // Inode + dentry commit together, so a failed link can't orphan the
+        // inode (C1/M6).
+        let mut tx = self.meta.begin().await?;
+        let ino = tx
             .create_inode(InodeInit {
                 kind: FileKind::Dir,
                 mode: DIR_MODE,
             })
             .await?;
-        self.meta.add_dentry(parent, name, ino).await?;
+        tx.add_dentry(parent, name, ino).await?;
+        tx.commit().await?;
         Ok(ino)
     }
 
@@ -128,15 +131,42 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                     ino = child;
                 }
                 None => {
-                    let child = self
-                        .meta
+                    // Create this segment atomically (inode + dentry). If a
+                    // concurrent writer wins the race, `add_dentry` errors on the
+                    // unique index; the transaction rolls back (no orphaned
+                    // inode) and we adopt the directory they created, keeping
+                    // `mkdir -p` idempotent under concurrency (C1/M6).
+                    let mut tx = self.meta.begin().await?;
+                    let child = tx
                         .create_inode(InodeInit {
                             kind: FileKind::Dir,
                             mode: DIR_MODE,
                         })
                         .await?;
-                    self.meta.add_dentry(ino, seg, child).await?;
-                    ino = child;
+                    match tx.add_dentry(ino, seg, child).await {
+                        Ok(()) => {
+                            tx.commit().await?;
+                            ino = child;
+                        }
+                        Err(AfsError::AlreadyExists(_)) => {
+                            drop(tx); // roll back the just-created inode
+                            let existing = self
+                                .meta
+                                .lookup(ino, seg)
+                                .await?
+                                .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
+                            let inode = self
+                                .meta
+                                .get_inode(existing)
+                                .await?
+                                .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
+                            if inode.kind != FileKind::Dir {
+                                return Err(AfsError::NotADirectory(path.to_string()));
+                            }
+                            ino = existing;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         }
@@ -162,8 +192,11 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if self.meta.child_count(ino).await? > 0 {
             return Err(AfsError::DirectoryNotEmpty(path.to_string()));
         }
-        self.meta.remove_dentry(parent, name).await?;
-        self.meta.delete_inode(ino).await?;
+        // Unlink + free the inode atomically (C1/L3).
+        let mut tx = self.meta.begin().await?;
+        tx.remove_dentry(parent, name).await?;
+        tx.delete_inode(ino).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -176,8 +209,17 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     // --- file operations --------------------------------------------------
 
-    /// Resolve or create the file inode for `(parent, name)`.
-    pub(crate) async fn ensure_file(&self, parent: Ino, name: &str, path: &str) -> Result<Ino> {
+    /// Resolve the *existing* file inode for `(parent, name)`, or `None` if the
+    /// name is free. Errors if the name exists but is a directory. Creating a
+    /// missing file is deferred to the caller's transaction (via
+    /// [`create_file_in`](Self::create_file_in)) so the new inode, its dentry,
+    /// and its content all commit atomically (C1/M6).
+    pub(crate) async fn lookup_file(
+        &self,
+        parent: Ino,
+        name: &str,
+        path: &str,
+    ) -> Result<Option<Ino>> {
         match self.meta.lookup(parent, name).await? {
             Some(existing) => {
                 let inode = self
@@ -188,20 +230,29 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 if inode.kind == FileKind::Dir {
                     return Err(AfsError::IsADirectory(path.to_string()));
                 }
-                Ok(existing)
+                Ok(Some(existing))
             }
-            None => {
-                let ino = self
-                    .meta
-                    .create_inode(InodeInit {
-                        kind: FileKind::File,
-                        mode: FILE_MODE,
-                    })
-                    .await?;
-                self.meta.add_dentry(parent, name, ino).await?;
-                Ok(ino)
-            }
+            None => Ok(None),
         }
+    }
+
+    /// Create a fresh regular-file inode and link it under `(parent, name)`,
+    /// inside `tx`. Pairs with [`lookup_file`](Self::lookup_file): if the name
+    /// was taken by a concurrent writer, `add_dentry` errors on the unique index
+    /// and the whole transaction rolls back rather than orphaning the inode.
+    pub(crate) async fn create_file_in(
+        tx: &mut dyn MetaTxn,
+        parent: Ino,
+        name: &str,
+    ) -> Result<Ino> {
+        let ino = tx
+            .create_inode(InodeInit {
+                kind: FileKind::File,
+                mode: FILE_MODE,
+            })
+            .await?;
+        tx.add_dentry(parent, name, ino).await?;
+        Ok(ino)
     }
 
     /// Chunk `data` (content-defined), store each chunk, and write a manifest.
@@ -223,6 +274,12 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             chunks,
         };
         let mhash = self.content.put(&manifest.encode()).await?;
+        // Durability barrier (C4): make the content durable before the metadata
+        // commit that will reference it. For LocalCasStore each `put` already
+        // fsynced; for PackStore this seals the open pack so a crash can't lose
+        // chunks that only lived in the in-memory buffer while metadata points
+        // at them. Most backends flush immediately, so this is a cheap no-op.
+        self.content.flush().await?;
         Ok((Some(mhash), manifest.size))
     }
 
@@ -236,9 +293,18 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     pub async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
         let (parent, name) = self.resolve_parent(path).await?;
         self.ensure_dir(parent).await?;
-        let ino = self.ensure_file(parent, name, path).await?;
+        let existing = self.lookup_file(parent, name, path).await?;
+        // Content is made durable first (store_body flushes), then the metadata
+        // that references it commits atomically: for a new file the inode, its
+        // dentry, and its content all land together or not at all (C1).
         let (mhash, size) = self.store_body(data).await?;
-        self.meta.set_content(ino, mhash, size).await?;
+        let mut tx = self.meta.begin().await?;
+        let ino = match existing {
+            Some(ino) => ino,
+            None => Self::create_file_in(tx.as_mut(), parent, name).await?,
+        };
+        tx.set_content(ino, mhash, size).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -250,7 +316,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     {
         let (parent, name) = self.resolve_parent(path).await?;
         self.ensure_dir(parent).await?;
-        let ino = self.ensure_file(parent, name, path).await?;
+        let existing = self.lookup_file(parent, name, path).await?;
 
         // Chunk on the blocking pool; deliver one chunk at a time to the async side.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<std::result::Result<Vec<u8>, String>>(8);
@@ -289,7 +355,18 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             let manifest = Manifest { size, chunks };
             Some(self.content.put(&manifest.encode()).await?)
         };
-        self.meta.set_content(ino, mhash, size).await?;
+        // Durability barrier (C4): seal/flush content before metadata references it.
+        self.content.flush().await?;
+        // Commit the metadata atomically — the txn spans only this fast final
+        // step, not the whole stream, so a large upload doesn't hold the write
+        // lock while chunking.
+        let mut txn = self.meta.begin().await?;
+        let ino = match existing {
+            Some(ino) => ino,
+            None => Self::create_file_in(txn.as_mut(), parent, name).await?,
+        };
+        txn.set_content(ino, mhash, size).await?;
+        txn.commit().await?;
         Ok(())
     }
 
@@ -390,13 +467,17 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if inode.kind == FileKind::Dir {
             return Err(AfsError::IsADirectory(path.to_string()));
         }
-        self.meta.remove_dentry(parent, name).await?;
+        // Unlink and the inode's fate (free vs. decrement) commit together, so a
+        // crash can't drop the name yet leave the inode dangling (C1/L3).
+        let mut tx = self.meta.begin().await?;
+        tx.remove_dentry(parent, name).await?;
         let nlink = inode.nlink - 1;
         if nlink <= 0 {
-            self.meta.delete_inode(ino).await?;
+            tx.delete_inode(ino).await?;
         } else {
-            self.meta.set_nlink(ino, nlink).await?;
+            tx.set_nlink(ino, nlink).await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -422,37 +503,43 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         let (dp, dn) = self.resolve_parent(to).await?;
         self.ensure_dir(dp).await?;
 
-        if let Some(dino) = self.meta.lookup(dp, dn).await? {
-            if dino == sino {
-                return Ok(());
-            }
-            let dinode = self
-                .meta
-                .get_inode(dino)
-                .await?
-                .ok_or_else(|| AfsError::NotFound(to.to_string()))?;
-            match dinode.kind {
-                FileKind::Dir => {
-                    if self.meta.child_count(dino).await? > 0 {
-                        return Err(AfsError::DirectoryNotEmpty(to.to_string()));
-                    }
-                    self.meta.remove_dentry(dp, dn).await?;
-                    self.meta.delete_inode(dino).await?;
+        // Read the destination's state before the txn; the mutations below all
+        // commit together so a crash mid-rename can't leave the source unlinked
+        // with the destination half-replaced, or orphan the overwritten inode.
+        let overwrite = match self.meta.lookup(dp, dn).await? {
+            Some(dino) if dino == sino => return Ok(()),
+            Some(dino) => {
+                let dinode = self
+                    .meta
+                    .get_inode(dino)
+                    .await?
+                    .ok_or_else(|| AfsError::NotFound(to.to_string()))?;
+                if dinode.kind == FileKind::Dir && self.meta.child_count(dino).await? > 0 {
+                    return Err(AfsError::DirectoryNotEmpty(to.to_string()));
                 }
+                Some((dino, dinode))
+            }
+            None => None,
+        };
+
+        let mut tx = self.meta.begin().await?;
+        if let Some((dino, dinode)) = overwrite {
+            tx.remove_dentry(dp, dn).await?;
+            match dinode.kind {
+                FileKind::Dir => tx.delete_inode(dino).await?,
                 _ => {
-                    self.meta.remove_dentry(dp, dn).await?;
                     let nlink = dinode.nlink - 1;
                     if nlink <= 0 {
-                        self.meta.delete_inode(dino).await?;
+                        tx.delete_inode(dino).await?;
                     } else {
-                        self.meta.set_nlink(dino, nlink).await?;
+                        tx.set_nlink(dino, nlink).await?;
                     }
                 }
             }
         }
-
-        self.meta.remove_dentry(sp, sn).await?;
-        self.meta.add_dentry(dp, dn, sino).await?;
+        tx.remove_dentry(sp, sn).await?;
+        tx.add_dentry(dp, dn, sino).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -465,15 +552,17 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if self.meta.lookup(parent, name).await?.is_some() {
             return Err(AfsError::AlreadyExists(linkpath.to_string()));
         }
-        let ino = self
-            .meta
+        // Inode, its target, and its dentry commit together (C1/M6).
+        let mut tx = self.meta.begin().await?;
+        let ino = tx
             .create_inode(InodeInit {
                 kind: FileKind::Symlink,
                 mode: SYMLINK_MODE,
             })
             .await?;
-        self.meta.set_symlink(ino, target).await?;
-        self.meta.add_dentry(parent, name, ino).await?;
+        tx.set_symlink(ino, target).await?;
+        tx.add_dentry(parent, name, ino).await?;
+        tx.commit().await?;
         Ok(ino)
     }
 

@@ -289,53 +289,68 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     pub async fn write_as(&self, ctx: WriteCtx, path: &str, data: &[u8]) -> Result<()> {
         let (parent, name) = self.resolve_parent(path).await?;
         self.ensure_dir(parent).await?;
-        let ino = self.ensure_file(parent, name, path).await?;
+        let existing = self.lookup_file(parent, name, path).await?;
 
-        let inode = self
-            .meta
-            .get_inode(ino)
-            .await?
-            .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
-        let pre_hash = inode.content;
-        let old_bytes = match pre_hash {
-            Some(h) => self.read_body(&h).await?,
-            None => Vec::new(),
+        // Prior content + authorship (reads, before the txn). A new file starts
+        // from empty bytes and no authorship.
+        let (pre_hash, old_bytes, old_authors) = match existing {
+            Some(ino) => {
+                let inode = self
+                    .meta
+                    .get_inode(ino)
+                    .await?
+                    .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
+                let pre = inode.content;
+                let bytes = match pre {
+                    Some(h) => self.read_body(&h).await?,
+                    None => Vec::new(),
+                };
+                let authors = match self.meta.get_line_blame(ino).await? {
+                    Some(s) => BlameMap::decode(&s).per_line(),
+                    None => Vec::new(),
+                };
+                (pre, bytes, authors)
+            }
+            None => (None, Vec::new(), Vec::new()),
         };
 
-        // Update line authorship.
+        // Compute the new line authorship.
         let blame = if is_text(&old_bytes) && is_text(data) {
-            let old_authors = match self.meta.get_line_blame(ino).await? {
-                Some(s) => BlameMap::decode(&s).per_line(),
-                None => Vec::new(),
-            };
             let new_authors = diff_authors(&old_bytes, data, &old_authors, (ctx.actor, ctx.sid()));
             BlameMap::from_per_line(&new_authors)
         } else {
             // Binary: file-level attribution (single unit).
             BlameMap::from_per_line(&[(ctx.actor, ctx.sid())])
         };
-        self.meta.set_line_blame(ino, &blame.encode()).await?;
 
-        // Store content.
+        // Content durable first, then commit blame + content + op-log together
+        // with the file's creation, so a crash can never leave a visible file
+        // with mismatched content/blame or a "successful" write half-recorded
+        // (C1). The op-log — the durable attribution ground truth — lands in the
+        // same transaction as the content it describes.
         let (mhash, size) = self.store_body(data).await?;
-        self.meta.set_content(ino, mhash, size).await?;
-
-        // Durable op-log entry.
-        self.meta
-            .append_edit_op(EditOpInit {
-                session_id: ctx.session,
-                actor_id: ctx.actor,
-                tool_call_id: ctx.tool_call,
-                ino,
-                path: path.to_string(),
-                op: "write".to_string(),
-                byte_start: 0,
-                byte_len: data.len() as i64,
-                pre_hash: pre_hash.map(|h| h.to_hex()),
-                post_hash: mhash.map(|h| h.to_hex()),
-                ts: now_secs(),
-            })
-            .await?;
+        let mut tx = self.meta.begin().await?;
+        let ino = match existing {
+            Some(ino) => ino,
+            None => Self::create_file_in(tx.as_mut(), parent, name).await?,
+        };
+        tx.set_line_blame(ino, &blame.encode()).await?;
+        tx.set_content(ino, mhash, size).await?;
+        tx.append_edit_op(EditOpInit {
+            session_id: ctx.session,
+            actor_id: ctx.actor,
+            tool_call_id: ctx.tool_call,
+            ino,
+            path: path.to_string(),
+            op: "write".to_string(),
+            byte_start: 0,
+            byte_len: data.len() as i64,
+            pre_hash: pre_hash.map(|h| h.to_hex()),
+            post_hash: mhash.map(|h| h.to_hex()),
+            ts: now_secs(),
+        })
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -417,25 +432,27 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             }
 
             let (mhash, size) = self.store_body(kept_body.as_bytes()).await?;
-            self.meta.set_content(ino, mhash, size).await?;
-            self.meta
-                .set_line_blame(ino, &BlameMap::from_per_line(&kept_authors).encode())
+            // Content, blame, and the revert op-log entry for this file commit
+            // atomically, keeping content and authorship in lockstep (C1).
+            let mut tx = self.meta.begin().await?;
+            tx.set_content(ino, mhash, size).await?;
+            tx.set_line_blame(ino, &BlameMap::from_per_line(&kept_authors).encode())
                 .await?;
-            self.meta
-                .append_edit_op(EditOpInit {
-                    session_id: None,
-                    actor_id,
-                    tool_call_id: None,
-                    ino,
-                    path,
-                    op: "revert".to_string(),
-                    byte_start: 0,
-                    byte_len: size as i64,
-                    pre_hash: None,
-                    post_hash: mhash.map(|h| h.to_hex()),
-                    ts: now_secs(),
-                })
-                .await?;
+            tx.append_edit_op(EditOpInit {
+                session_id: None,
+                actor_id,
+                tool_call_id: None,
+                ino,
+                path,
+                op: "revert".to_string(),
+                byte_start: 0,
+                byte_len: size as i64,
+                pre_hash: None,
+                post_hash: mhash.map(|h| h.to_hex()),
+                ts: now_secs(),
+            })
+            .await?;
+            tx.commit().await?;
             changed += 1;
         }
         Ok(changed)

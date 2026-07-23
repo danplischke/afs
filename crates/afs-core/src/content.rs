@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::io::AsyncWriteExt;
 
 /// A content-addressed blob store. Writes are idempotent: storing identical
 /// bytes yields the same [`Hash`] and does not duplicate storage.
@@ -71,6 +73,11 @@ pub trait ContentStore: Send + Sync {
 /// of the hash to keep directories small.
 pub struct LocalCasStore {
     root: PathBuf,
+    /// Number of `fsync`s performed by durable writes. A write fsyncs the
+    /// object's bytes and its parent directory before returning; this counter
+    /// lets tests assert the durability barrier actually ran (C3). Not part of
+    /// the [`ContentStore`] contract.
+    syncs: AtomicU64,
 }
 
 impl LocalCasStore {
@@ -78,7 +85,10 @@ impl LocalCasStore {
     pub async fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         tokio::fs::create_dir_all(root.join("objects")).await?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            syncs: AtomicU64::new(0),
+        })
     }
 
     fn path_for(&self, hash: &Hash) -> PathBuf {
@@ -90,15 +100,40 @@ impl LocalCasStore {
         tokio::fs::metadata(path).await.is_ok()
     }
 
+    /// Number of `fsync` operations durable writes have performed so far.
+    /// Exposed for tests to verify the durability barrier ran.
+    pub fn sync_count(&self) -> u64 {
+        self.syncs.load(Ordering::Relaxed)
+    }
+
     /// Write `bytes` at `path` via a temp sibling + rename, so readers never
-    /// observe a partial blob.
+    /// observe a partial blob — and fsync so a crash can't lose it (C3).
+    ///
+    /// The temp file's contents are fsynced *before* the rename, so a crash can
+    /// never leave the object durably named over unwritten (zero/torn) bytes;
+    /// then the parent directory is fsynced so the rename entry itself survives.
+    /// This establishes the invariant the metadata layer relies on: content is
+    /// on disk before any metadata references it.
     async fn write_at(&self, path: &Path, bytes: &[u8]) -> Result<()> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         let tmp = path.with_extension("tmp");
-        tokio::fs::write(&tmp, bytes).await?;
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        f.write_all(bytes).await?;
+        f.sync_all().await?;
+        drop(f);
+        self.syncs.fetch_add(1, Ordering::Relaxed);
         tokio::fs::rename(&tmp, path).await?;
+        // Directory fsync makes the rename durable. Unix-only: Windows has no
+        // portable directory-fsync, and the temp-file fsync above still bounds
+        // the exposure there.
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            let dir = tokio::fs::File::open(parent).await?;
+            dir.sync_all().await?;
+            self.syncs.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 }

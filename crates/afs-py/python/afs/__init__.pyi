@@ -1,4 +1,4 @@
-"""Type stubs for the afs extension module.
+"""Type stubs for the afs package (re-exported from the ``afs._afs`` extension).
 
 Every I/O method is async (returns an awaitable) so it composes with FastAPI's
 `async def` handlers. Structured results are plain ``dict``/``list`` objects,

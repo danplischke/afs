@@ -14,11 +14,14 @@ classifiers = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-# For the FastAPI example under examples/.
+# The `afs.fastapi` router integration (and the examples under examples/).
 fastapi = ["fastapi", "uvicorn"]
 
 [tool.maturin]
 # Build the importable extension module (pyo3 resolves libpython at import).
 features = ["extension-module"]
-# Ship type information next to the compiled module.
-include = ["afs.pyi", "py.typed"]
+# Mixed layout: the pure-Python `afs` package lives under python/, and the
+# compiled core is imported as its `afs._afs` submodule. Type stubs and
+# py.typed ship inside python/afs/ automatically.
+python-source = "python"
+module-name = "afs._afs"

@@ -779,8 +779,11 @@ fn fuse_mountable() -> bool {
     afs_fuse::mountable()
 }
 
+/// The compiled extension is imported as `afs._afs`; the pure-Python package
+/// `afs` (see `python/afs/__init__.py`) re-exports everything from it and adds
+/// optional integrations like `afs.fastapi`.
 #[pymodule]
-fn afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Workspace>()?;
     m.add_class::<WriteCtx>()?;
     m.add_class::<Mount>()?;

@@ -7,7 +7,9 @@ repository.workspace = true
 description = "Python bindings for afs (agent filesystem)"
 
 [lib]
-name = "afs"
+# The extension is imported as `afs._afs` (mixed layout: pure-Python `afs`
+# package under python/, compiled core as its `_afs` submodule).
+name = "_afs"
 # cdylib -> the importable Python extension module; rlib -> lets the workspace
 # build/test it against a real libpython (extension-module is maturin-only).
 crate-type = ["cdylib", "rlib"]

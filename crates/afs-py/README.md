@@ -39,6 +39,34 @@ await ws.accept_suggestion(sid, afs.WriteCtx.actor(reviewer))  # applied, credit
 Errors map to Python exceptions: missing path → `FileNotFoundError`, bad arg →
 `ValueError`, a stale suggestion base → `afs.ConflictError`.
 
+## FastAPI router (bring your own auth)
+
+afs has no built-in authentication — a blame trail is only trustworthy if the
+identity behind each write is, and that's yours to own. `afs.fastapi.build_router`
+gives you every workspace endpoint wired up, with attribution driven by an auth
+dependency **you** provide:
+
+```python
+from fastapi import FastAPI, Header, HTTPException
+import afs
+from afs.fastapi import build_router
+
+async def authn(x_actor_id: int = Header(...)) -> afs.WriteCtx:
+    # decode your JWT / session / agent token -> the afs actor to attribute to
+    if x_actor_id is None:
+        raise HTTPException(401)
+    return afs.WriteCtx.actor(x_actor_id)
+
+app = FastAPI()
+app.include_router(build_router(ws, authn=authn), prefix="/fs")
+```
+
+Every mutating route depends on `authn` and passes its `WriteCtx` straight to the
+workspace — the request body never names an actor, so a client can't forge
+attribution. Reads are open by default; pass `reader=<dependency>` to gate them,
+or `dependencies=[...]` (forwarded to `APIRouter`) to gate everything. Needs the
+`fastapi` extra (`pip install "afs[fastapi]"`). See `examples/fastapi_router.py`.
+
 ## Mount orchestration
 
 ```python

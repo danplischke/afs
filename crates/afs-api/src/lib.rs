@@ -12,9 +12,9 @@
 //! verified identity, never from a request field, so a client cannot forge
 //! attribution or mint identities anonymously. [`BearerAuth`] is a ready-made
 //! `Authorization: Bearer` token→actor map; implement [`Authenticator`] for
-//! anything dynamic (JWT, a session DB). Reads are open by default — gate them at
-//! your proxy or a wrapping layer if you need to. This mirrors the Python
-//! `afs.fastapi.build_router` model.
+//! anything dynamic (JWT, a session DB). Reads are open by default — pass
+//! `gate_reads` to [`router_with`] (or gate at your proxy) to require a credential
+//! for reads too. This mirrors the Python `afs.fastapi.build_router` model.
 //!
 //! Files are transferred as raw bytes (`application/octet-stream`); everything
 //! else is JSON. Paths are the URL tail after the resource segment, e.g.
@@ -23,8 +23,9 @@
 use afs_sdk::{Workspace, WriteCtx};
 use axum::{
     body::Bytes,
-    extract::{FromRef, FromRequestParts, Path, Query, State},
+    extract::{FromRef, FromRequestParts, Path, Query, Request, State},
     http::{request::Parts, HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -151,13 +152,26 @@ impl FromRequestParts<AppState> for Auth {
     }
 }
 
-/// Build the router for a workspace with the given authenticator. Every mutating
-/// route requires an authenticated [`Principal`] (resolved by `auth`); reads are
-/// open by default — gate them at your proxy or a wrapping layer if you need to.
+/// Options for [`router_with`].
+#[derive(Clone, Default)]
+pub struct ApiOptions {
+    /// Require an authenticated principal for reads too, not only mutations. Off
+    /// by default: reads are open (parity with the Python `build_router`). When
+    /// on, every route except `/health` demands a valid credential.
+    pub gate_reads: bool,
+}
+
+/// Build the router for a workspace. Every mutating route requires an
+/// authenticated [`Principal`]; reads are open by default — use [`router_with`]
+/// with `gate_reads` to require a credential on reads too.
 pub fn router(ws: Shared, auth: Arc<dyn Authenticator>) -> Router {
+    router_with(ws, auth, ApiOptions::default())
+}
+
+/// Like [`router`], with [`ApiOptions`] (e.g. `gate_reads`).
+pub fn router_with(ws: Shared, auth: Arc<dyn Authenticator>, options: ApiOptions) -> Router {
     let state = AppState { ws, auth };
-    Router::new()
-        .route("/health", get(health))
+    let mut app = Router::new()
         .route(
             "/files/{*path}",
             get(read_file).put(write_file).delete(delete_file),
@@ -181,8 +195,28 @@ pub fn router(ws: Shared, auth: Arc<dyn Authenticator>) -> Router {
         .route("/suggestions/{id}/accept", post(accept_suggestion))
         .route("/suggestions/{id}/reject", post(reject_suggestion))
         .route("/actors", post(create_actor))
-        .route("/sessions", post(create_session))
-        .with_state(state)
+        .route("/sessions", post(create_session));
+    if options.gate_reads {
+        // Require a valid credential for every data route, reads included.
+        // Mutations already enforce it in-handler; this closes reads too.
+        app = app.route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+    }
+    // `/health` is registered after the gate, so it stays open regardless.
+    app.route("/health", get(health)).with_state(state)
+}
+
+/// Middleware that rejects with `401` unless the request carries a credential the
+/// [`Authenticator`] accepts. Applied to reads only when `gate_reads` is set
+/// (mutations always gate in-handler via the [`Auth`] extractor).
+async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    match state.auth.authenticate(req.headers()).await {
+        Some(_) => next.run(req).await,
+        None => ApiError::status(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated: a valid credential is required",
+        )
+        .into_response(),
+    }
 }
 
 /// Serve the workspace over HTTP, blocking until the server stops.

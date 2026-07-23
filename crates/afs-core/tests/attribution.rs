@@ -141,3 +141,151 @@ async fn binary_files_get_file_level_attribution() {
     assert_eq!(b.len(), 1);
     assert_eq!(b[0].actor.id, claude);
 }
+
+// M9: blame is keyed by the content version an inode points at, so it survives a
+// checkout that swaps the working tree between commits — the blame you see always
+// matches the bytes you'd read, never a stale carry-over from another branch.
+#[tokio::test]
+async fn blame_survives_checkout() {
+    let fs = fixture().await;
+    let alice = fs.create_human("alice", None).await.unwrap();
+    let claude = fs.create_agent("claude", "m", Some(alice)).await.unwrap();
+    let s_alice = fs.create_session(alice, None).await.unwrap();
+    let s_claude = fs.create_session(claude, None).await.unwrap();
+
+    // v1 on main: alice writes two lines, commit, then branch `dev` off v1.
+    fs.write_as(WriteCtx::session(alice, s_alice), "/f", b"one\ntwo\n")
+        .await
+        .unwrap();
+    fs.commit("alice", "v1").await.unwrap();
+    fs.create_branch("dev").await.unwrap();
+
+    // v2 on main: claude appends a third line, commit.
+    fs.write_as(
+        WriteCtx::session(claude, s_claude),
+        "/f",
+        b"one\ntwo\nthree\n",
+    )
+    .await
+    .unwrap();
+    fs.commit("claude", "v2").await.unwrap();
+
+    // main (v2): alice on 1-2, claude on 3.
+    let b = fs.blame("/f").await.unwrap();
+    assert_eq!(b.len(), 2);
+    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
+    assert_eq!((b[1].actor.id, b[1].line_start, b[1].line_end), (claude, 3, 3));
+
+    // Checkout dev (v1): the working tree is two lines again, and blame follows
+    // the checked-out content — all alice, no stale `claude`/past-EOF run.
+    fs.checkout("dev").await.unwrap();
+    assert_eq!(&fs.read("/f").await.unwrap()[..], b"one\ntwo\n");
+    let b = fs.blame("/f").await.unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
+
+    // Back to main (v2): blame is exactly what it was before we left.
+    fs.checkout("main").await.unwrap();
+    assert_eq!(&fs.read("/f").await.unwrap()[..], b"one\ntwo\nthree\n");
+    let b = fs.blame("/f").await.unwrap();
+    assert_eq!(b.len(), 2);
+    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
+    assert_eq!((b[1].actor.id, b[1].line_start, b[1].line_end), (claude, 3, 3));
+}
+
+// H7: a plain (non-attributed) `write` replaces the content but records no
+// authorship, so blame for the new version is simply absent — never the old
+// version's runs stretched over content that no longer matches (the past-EOF /
+// desync bug the per-inode model had).
+#[tokio::test]
+async fn unattributed_write_invalidates_blame() {
+    let fs = fixture().await;
+    let claude = fs.create_agent("claude", "m", None).await.unwrap();
+    let s = fs.create_session(claude, None).await.unwrap();
+
+    fs.write_as(WriteCtx::session(claude, s), "/f", b"a\nb\nc\n")
+        .await
+        .unwrap();
+    let b = fs.blame("/f").await.unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (claude, 1, 3));
+
+    // Someone edits the file outside the attributed path, shrinking it.
+    fs.write("/f", b"z\n").await.unwrap();
+    assert_eq!(&fs.read("/f").await.unwrap()[..], b"z\n");
+    let b = fs.blame("/f").await.unwrap();
+    assert!(
+        b.is_empty(),
+        "unattributed write must leave no stale blame, got {b:?}"
+    );
+
+    // A later attributed write re-establishes blame for the current content.
+    fs.write_as(WriteCtx::session(claude, s), "/f", b"z\nY\n")
+        .await
+        .unwrap();
+    let b = fs.blame("/f").await.unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (claude, 1, 2));
+}
+
+// M10: a pure re-indent is not an authorship change. The whitespace-normalized
+// line still matches its deleted original, so the reformatter doesn't steal the
+// blame for content they only shifted.
+#[tokio::test]
+async fn reindent_keeps_original_author() {
+    let fs = fixture().await;
+    let alice = fs.create_human("alice", None).await.unwrap();
+    let claude = fs.create_agent("claude", "m", Some(alice)).await.unwrap();
+    let s_alice = fs.create_session(alice, None).await.unwrap();
+    let s_claude = fs.create_session(claude, None).await.unwrap();
+
+    fs.write_as(WriteCtx::session(alice, s_alice), "/f", b"foo\nbar\n")
+        .await
+        .unwrap();
+    // Claude only re-indents the first line.
+    fs.write_as(WriteCtx::session(claude, s_claude), "/f", b"    foo\nbar\n")
+        .await
+        .unwrap();
+
+    let b = fs.blame("/f").await.unwrap();
+    assert_eq!(b.len(), 1, "re-indent must not split authorship, got {b:?}");
+    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
+}
+
+// M10: a line that is *moved* carries its author to its new position, rather than
+// being credited to whoever reordered the file.
+#[tokio::test]
+async fn moved_line_keeps_its_author() {
+    let fs = fixture().await;
+    let alice = fs.create_human("alice", None).await.unwrap();
+    let claude = fs.create_agent("claude", "m", Some(alice)).await.unwrap();
+    let s_alice = fs.create_session(alice, None).await.unwrap();
+    let s_claude = fs.create_session(claude, None).await.unwrap();
+
+    // Alice writes two lines; claude appends a third.
+    fs.write_as(WriteCtx::session(alice, s_alice), "/f", b"one\ntwo\n")
+        .await
+        .unwrap();
+    fs.write_as(
+        WriteCtx::session(claude, s_claude),
+        "/f",
+        b"one\ntwo\nthree\n",
+    )
+    .await
+    .unwrap();
+
+    // Alice reorders, hoisting claude's line to the top.
+    fs.write_as(
+        WriteCtx::session(alice, s_alice),
+        "/f",
+        b"three\none\ntwo\n",
+    )
+    .await
+    .unwrap();
+
+    let b = fs.blame("/f").await.unwrap();
+    // `three` stays claude at its new home; `one`/`two` remain alice.
+    assert_eq!(b.len(), 2, "got {b:?}");
+    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (claude, 1, 1));
+    assert_eq!((b[1].actor.id, b[1].line_start, b[1].line_end), (alice, 2, 3));
+}

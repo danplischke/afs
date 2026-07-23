@@ -562,8 +562,11 @@ impl MetadataStore for PostgresMetadataStore {
 
     async fn truncate_tree(&self) -> Result<()> {
         let c = self.client().await?;
+        // Blame is keyed by content hash (blob_blame), not by inode, so it is
+        // deliberately not cleared here — a rematerialized tree points its inodes
+        // back at the same content and its blame comes with it.
         c.batch_execute(
-            "DELETE FROM dentry; DELETE FROM symlink; DELETE FROM line_blame;
+            "DELETE FROM dentry; DELETE FROM symlink;
              DELETE FROM inode WHERE ino <> 1;",
         )
         .await?;
@@ -757,21 +760,26 @@ impl MetadataStore for PostgresMetadataStore {
             .collect())
     }
 
-    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()> {
+    async fn set_blob_blame(&self, content: &Hash, runs: &str) -> Result<()> {
         let c = self.client().await?;
+        let hex = content.to_hex();
         c.execute(
-            "INSERT INTO line_blame(ino, runs) VALUES ($1, $2)
-             ON CONFLICT (ino) DO UPDATE SET runs = EXCLUDED.runs",
-            &[&ino, &runs],
+            "INSERT INTO blob_blame(content_hash, runs) VALUES ($1, $2)
+             ON CONFLICT (content_hash) DO UPDATE SET runs = EXCLUDED.runs",
+            &[&hex, &runs],
         )
         .await?;
         Ok(())
     }
 
-    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>> {
+    async fn get_blob_blame(&self, content: &Hash) -> Result<Option<String>> {
         let c = self.client().await?;
+        let hex = content.to_hex();
         let row = c
-            .query_opt("SELECT runs FROM line_blame WHERE ino = $1", &[&ino])
+            .query_opt(
+                "SELECT runs FROM blob_blame WHERE content_hash = $1",
+                &[&hex],
+            )
             .await?;
         Ok(row.map(|r| r.get(0)))
     }
@@ -1058,12 +1066,13 @@ impl MetaTxn for PostgresTxn {
         Ok(())
     }
 
-    async fn set_line_blame(&mut self, ino: Ino, runs: &str) -> Result<()> {
+    async fn set_blob_blame(&mut self, content: &Hash, runs: &str) -> Result<()> {
+        let hex = content.to_hex();
         self.conn()
             .execute(
-                "INSERT INTO line_blame(ino, runs) VALUES ($1, $2)
-                 ON CONFLICT (ino) DO UPDATE SET runs = EXCLUDED.runs",
-                &[&ino, &runs],
+                "INSERT INTO blob_blame(content_hash, runs) VALUES ($1, $2)
+                 ON CONFLICT (content_hash) DO UPDATE SET runs = EXCLUDED.runs",
+                &[&hex, &runs],
             )
             .await?;
         Ok(())

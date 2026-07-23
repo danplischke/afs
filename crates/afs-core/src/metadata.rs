@@ -130,8 +130,12 @@ pub trait MetadataStore: Send + Sync {
     async fn record_tool_call(&self, tc: ToolCallInit) -> Result<i64>;
     async fn append_edit_op(&self, op: EditOpInit) -> Result<i64>;
     async fn list_edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>>;
-    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()>;
-    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>>;
+    /// Set (upsert) the line-authorship map for a *content version* (a blob's
+    /// manifest hash), so blame survives checkout/merge and never desyncs from
+    /// the content it describes. Empty content has no blame.
+    async fn set_blob_blame(&self, content: &Hash, runs: &str) -> Result<()>;
+    /// Fetch the line-authorship map for a content version, if recorded.
+    async fn get_blob_blame(&self, content: &Hash) -> Result<Option<String>>;
 
     // --- collaboration: change feed + presence ---------------------------
 
@@ -203,8 +207,8 @@ pub trait MetaTxn: Send {
     async fn remove_dentry(&mut self, parent: Ino, name: &str) -> Result<()>;
     /// Set (or replace) a symlink target.
     async fn set_symlink(&mut self, ino: Ino, target: &str) -> Result<()>;
-    /// Set (or replace) an inode's line-authorship map.
-    async fn set_line_blame(&mut self, ino: Ino, runs: &str) -> Result<()>;
+    /// Set (or replace) the line-authorship map for a content version.
+    async fn set_blob_blame(&mut self, content: &Hash, runs: &str) -> Result<()>;
     /// Append an op-log entry, returning its id.
     async fn append_edit_op(&mut self, op: EditOpInit) -> Result<i64>;
     /// Commit every staged mutation atomically. Consumes the transaction.
@@ -322,11 +326,11 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     async fn list_edit_ops(&self, actor_id: i64, session_id: Option<i64>) -> Result<Vec<EditOp>> {
         (**self).list_edit_ops(actor_id, session_id).await
     }
-    async fn set_line_blame(&self, ino: Ino, runs: &str) -> Result<()> {
-        (**self).set_line_blame(ino, runs).await
+    async fn set_blob_blame(&self, content: &Hash, runs: &str) -> Result<()> {
+        (**self).set_blob_blame(content, runs).await
     }
-    async fn get_line_blame(&self, ino: Ino) -> Result<Option<String>> {
-        (**self).get_line_blame(ino).await
+    async fn get_blob_blame(&self, content: &Hash) -> Result<Option<String>> {
+        (**self).get_blob_blame(content).await
     }
     async fn append_event(&self, ev: EventInit, ts: i64) -> Result<i64> {
         (**self).append_event(ev, ts).await

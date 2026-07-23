@@ -61,7 +61,24 @@ pub const MIGRATIONS: &[Migration] = &[
         sqlite: V7_SQLITE,
         postgres: V7_POSTGRES,
     },
+    // V8 — blame keyed by content hash (blob version) rather than by inode, so
+    // per-line authorship survives checkout/merge (the inode is rebuilt, but the
+    // content hash it points at carries the blame) and can never desync from the
+    // content it describes. Identical SQL in both dialects (a plain TEXT key).
+    Migration {
+        version: 8,
+        sqlite: V8,
+        postgres: V8,
+    },
 ];
+
+// V8 — per-blob-version blame (see the migration entry above).
+const V8: &str = "
+CREATE TABLE IF NOT EXISTS blob_blame(
+    content_hash TEXT PRIMARY KEY,
+    runs         TEXT NOT NULL
+);
+";
 
 // SQLite has no `ADD COLUMN IF NOT EXISTS`; the migration runner tolerates a
 // re-applied ADD COLUMN (duplicate-column) so a re-run is idempotent. Postgres

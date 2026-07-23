@@ -22,6 +22,7 @@ dependencies = [
 name = "afs-api"
 version = "0.0.0"
 dependencies = [
+ "afs-review",
  "afs-sdk",
  "async-trait",
  "axum",
@@ -136,6 +137,19 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "tokio",
+]
+
+[[package]]
+name = "afs-review"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "flate2",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "similar",
+ "thiserror",
 ]
 
 [[package]]

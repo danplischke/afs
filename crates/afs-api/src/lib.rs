@@ -178,6 +178,9 @@ pub fn router(ws: Shared, auth: Arc<dyn Authenticator>) -> Router {
         .route("/suggestions", get(list_suggestions).post(create_suggestion))
         .route("/suggestions/{id}", get(get_suggestion))
         .route("/suggestions/{id}/diff", get(suggestion_diff))
+        .route("/suggestions/{id}/review", get(suggestion_review))
+        .route("/suggestions/{id}/base", get(suggestion_base))
+        .route("/suggestions/{id}/proposed", get(suggestion_proposed))
         .route("/suggestions/{id}/accept", post(accept_suggestion))
         .route("/suggestions/{id}/reject", post(reject_suggestion))
         .route("/actors", post(create_actor))
@@ -580,6 +583,96 @@ async fn suggestion_diff(
 ) -> ApiResult<Json<serde_json::Value>> {
     let diff = ws.suggestion_diff(id).await?;
     Ok(Json(json!({ "id": id, "diff": diff })))
+}
+
+/// Raw bytes of a suggestion's base (current) version — the content its proposal
+/// was computed against. `404` if the suggestion proposed a *new* file (no base).
+/// Scoped to the suggestion, so this never exposes arbitrary content by hash.
+async fn suggestion_base(State(ws): State<Shared>, Path(id): Path<i64>) -> ApiResult<Response> {
+    suggestion_bytes(&ws, id, false).await
+}
+
+/// Raw bytes of a suggestion's proposed version — the body an agent proposed,
+/// which is not in the working tree until accept. `404` for a proposed deletion.
+async fn suggestion_proposed(State(ws): State<Shared>, Path(id): Path<i64>) -> ApiResult<Response> {
+    suggestion_bytes(&ws, id, true).await
+}
+
+async fn suggestion_bytes(ws: &Workspace, id: i64, proposed: bool) -> ApiResult<Response> {
+    let s = ws
+        .get_suggestion(id)
+        .await?
+        .ok_or_else(|| afs_sdk::AfsError::NotFound(format!("suggestion #{id}")))?;
+    let (hash, side) = if proposed {
+        (s.proposed_hash, "proposed")
+    } else {
+        (s.base_hash, "base")
+    };
+    let hash = hash
+        .ok_or_else(|| afs_sdk::AfsError::NotFound(format!("suggestion #{id} has no {side} content")))?;
+    let bytes = ws.read_content(&hash).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, mime_for(&s.path))], bytes.to_vec()).into_response())
+}
+
+#[derive(Deserialize)]
+struct ReviewQuery {
+    tier: Option<String>,
+}
+
+/// A **projected**, human-reviewable diff of a suggestion. For an Office document
+/// (`.docx`/`.pptx`/`.xlsx`) this returns a structured `DiffView` (changed
+/// paragraphs / slides / cells) via `afs-review`; for any other path it falls
+/// back to the plain unified text diff. Only the `text` tier exists today.
+async fn suggestion_review(
+    State(ws): State<Shared>,
+    Path(id): Path<i64>,
+    Query(q): Query<ReviewQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let tier = q.tier.as_deref().unwrap_or("text");
+    if tier != "text" {
+        return Err(ApiError::status(
+            StatusCode::NOT_IMPLEMENTED,
+            format!("review tier {tier:?} is not implemented yet (only 'text')"),
+        ));
+    }
+    let s = ws
+        .get_suggestion(id)
+        .await?
+        .ok_or_else(|| afs_sdk::AfsError::NotFound(format!("suggestion #{id}")))?;
+
+    match afs_review::Format::from_path(&s.path) {
+        Some(format) => {
+            // Project the pinned base + proposed bytes and diff the models.
+            let base = match &s.base_hash {
+                Some(h) => Some(ws.read_content(h).await?),
+                None => None,
+            };
+            let proposed = match &s.proposed_hash {
+                Some(h) => Some(ws.read_content(h).await?),
+                None => None,
+            };
+            let view = afs_review::review(format, base.as_deref(), proposed.as_deref())
+                .map_err(|e| ApiError::status(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+            let view = serde_json::to_value(&view)
+                .map_err(|e| ApiError::status(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(Json(json!({ "id": id, "path": s.path, "kind": "office", "review": view })))
+        }
+        // Not an Office document: the plain unified text diff is still useful.
+        None => {
+            let diff = ws.suggestion_diff(id).await?;
+            Ok(Json(json!({ "id": id, "path": s.path, "kind": "text", "diff": diff })))
+        }
+    }
+}
+
+/// The OOXML MIME type for a path's extension, else octet-stream.
+fn mime_for(path: &str) -> &'static str {
+    match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn accept_suggestion(

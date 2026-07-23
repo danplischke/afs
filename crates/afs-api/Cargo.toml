@@ -8,6 +8,7 @@ description.workspace = true
 
 [dependencies]
 afs-sdk = { version = "0.1.0", path = "../afs-sdk" }
+afs-review = { version = "0.1.0", path = "../afs-review" }
 async-trait = "0.1.83"
 axum = "0.8.7"
 serde = { version = "1.0.228", features = ["derive"] }

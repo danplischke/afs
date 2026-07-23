@@ -1,0 +1,21 @@
+[package]
+name = "afs-review"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Office-document (docx/pptx/xlsx) projection + diff for reviewing afs suggestions"
+
+# A pure `bytes -> model -> diff` library: it turns the opaque bytes of an Office
+# document into a reviewable, aligned diff. No afs-core/afs-sdk dependency, so it
+# is fully unit-testable with synthetic fixtures; the surfaces (afs-api) glue it
+# to a workspace. See docs/proposals/office-suggestion-review.md.
+[dependencies]
+quick-xml = "0.38"
+flate2 = "1"
+blake3 = "1"
+similar = "3"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

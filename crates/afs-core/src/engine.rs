@@ -414,9 +414,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     }
 
     /// Reassemble a file body from its manifest hash (the content address stored
-    /// on a file inode / tree entry). Used by `read` and by the diff API to
-    /// reconstruct a specific version's bytes.
-    pub(crate) async fn content_bytes(&self, mhash: &Hash) -> Result<Bytes> {
+    /// on a file inode / tree entry). Used by `read`, by the diff API, and by
+    /// `Workspace::read_content` to reconstruct a specific version's bytes (e.g.
+    /// a suggestion's base/proposed body for Office-document review).
+    pub async fn content_bytes(&self, mhash: &Hash) -> Result<Bytes> {
         let manifest = self.load_manifest(mhash).await?;
         // Don't trust the manifest's declared sizes for the up-front allocation:
         // even though `Manifest::decode` checks `size == Σ chunk.len`, a crafted

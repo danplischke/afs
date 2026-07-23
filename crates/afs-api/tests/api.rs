@@ -344,3 +344,105 @@ async fn unauthenticated_and_forged_mutations_are_rejected() {
     assert_eq!(blame[0]["actor"], "dan", "attribution must follow the token, not ?actor=");
     assert_eq!(blame[0]["kind"], "human");
 }
+
+// --- Office-document suggestion review --------------------------------------
+
+/// A minimal STORE-method (uncompressed) `.docx` with the given paragraphs — a
+/// valid OPC package the review projector reads, built without a zip dependency.
+fn docx_bytes(paragraphs: &[&str]) -> Vec<u8> {
+    let body: String = paragraphs
+        .iter()
+        .map(|t| format!("<w:p><w:r><w:t>{t}</w:t></w:r></w:p>"))
+        .collect();
+    let doc = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+    );
+    let (name, data) = ("word/document.xml", doc.as_bytes());
+    let (nb, dl) = (name.as_bytes(), data.len() as u32);
+    let mut z = Vec::new();
+    z.extend_from_slice(&0x0403_4b50u32.to_le_bytes()); // local header
+    z.extend_from_slice(&[0; 10]); // version, flags, method, mod time, mod date
+    z.extend_from_slice(&0u32.to_le_bytes()); // crc
+    z.extend_from_slice(&dl.to_le_bytes()); // comp size
+    z.extend_from_slice(&dl.to_le_bytes()); // uncomp size
+    z.extend_from_slice(&(nb.len() as u16).to_le_bytes());
+    z.extend_from_slice(&0u16.to_le_bytes());
+    z.extend_from_slice(nb);
+    z.extend_from_slice(data);
+    let cd_off = z.len() as u32;
+    let mut c = Vec::new();
+    c.extend_from_slice(&0x0201_4b50u32.to_le_bytes()); // central header
+    c.extend_from_slice(&[0; 12]); // version made/needed, flags, method, time, date
+    c.extend_from_slice(&0u32.to_le_bytes()); // crc
+    c.extend_from_slice(&dl.to_le_bytes());
+    c.extend_from_slice(&dl.to_le_bytes());
+    c.extend_from_slice(&(nb.len() as u16).to_le_bytes());
+    c.extend_from_slice(&[0; 8]); // extra, comment, disk, internal attrs
+    c.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+    c.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+    c.extend_from_slice(nb);
+    let cd_size = c.len() as u32;
+    z.extend_from_slice(&c);
+    z.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // EOCD
+    z.extend_from_slice(&[0; 4]); // disks
+    z.extend_from_slice(&1u16.to_le_bytes());
+    z.extend_from_slice(&1u16.to_le_bytes());
+    z.extend_from_slice(&cd_size.to_le_bytes());
+    z.extend_from_slice(&cd_off.to_le_bytes());
+    z.extend_from_slice(&0u16.to_le_bytes());
+    z
+}
+
+#[tokio::test]
+async fn office_suggestion_review_projects_a_docx_diff() {
+    let fx = fixture().await;
+    let app = &fx.app;
+
+    let base = docx_bytes(&["Quarterly report", "Revenue grew"]);
+    let proposed = docx_bytes(&["Quarterly report", "Revenue grew 20%"]);
+
+    // A human writes the base document; an agent proposes an edit.
+    let (st, _) = send(app, put_as("/files/report.docx", T_HUMAN, &base)).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, body) =
+        send(app, post_bytes_as("/suggestions?path=/report.docx", T_AGENT, &proposed)).await;
+    assert_eq!(st, StatusCode::OK);
+    let id = as_json(&body)["id"].as_i64().unwrap();
+
+    // The projected review is a structured Office diff, not byte noise.
+    let (st, body) = send(app, get(&format!("/suggestions/{id}/review"))).await;
+    assert_eq!(st, StatusCode::OK);
+    let r = as_json(&body);
+    assert_eq!(r["kind"], "office");
+    assert_eq!(r["review"]["format"], "docx");
+    assert_eq!(r["review"]["summary"]["units_changed"], 1);
+
+    // The proposed bytes (never in the working tree) are fetchable and exact.
+    let (st, got) = send(app, get(&format!("/suggestions/{id}/proposed"))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(got, proposed);
+
+    // The pinned base bytes are fetchable too.
+    let (st, got) = send(app, get(&format!("/suggestions/{id}/base"))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(got, base);
+}
+
+#[tokio::test]
+async fn review_falls_back_to_text_for_non_office_paths() {
+    let fx = fixture().await;
+    let app = &fx.app;
+
+    let (st, _) = send(app, put_as("/files/notes.txt", T_HUMAN, b"hello\n")).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, body) =
+        send(app, post_bytes_as("/suggestions?path=/notes.txt", T_AGENT, b"hello world\n")).await;
+    assert_eq!(st, StatusCode::OK);
+    let id = as_json(&body)["id"].as_i64().unwrap();
+
+    let (st, body) = send(app, get(&format!("/suggestions/{id}/review"))).await;
+    assert_eq!(st, StatusCode::OK);
+    let r = as_json(&body);
+    assert_eq!(r["kind"], "text");
+    assert!(r["diff"].as_str().unwrap().contains("hello world"));
+}

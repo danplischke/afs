@@ -215,6 +215,19 @@ impl Workspace {
         self.fs.read_range(path, off, len).await
     }
 
+    /// Read a file body straight from the content store by its manifest hash
+    /// (hex), as recorded on a suggestion's `base_hash`/`proposed_hash`. Unlike
+    /// [`read`](Self::read), which resolves a live path, this fetches an exact
+    /// immutable version — so a reviewer can retrieve the *proposed* bytes (never
+    /// in the working tree until accept) or the pinned *base* even after the file
+    /// moved on. Errors on a malformed or absent hash.
+    pub async fn read_content(&self, manifest_hex: &str) -> Result<Bytes> {
+        let hash = Hash::from_hex(manifest_hex).ok_or_else(|| {
+            AfsError::InvalidArgument(format!("invalid content hash: {manifest_hex}"))
+        })?;
+        self.fs.content_bytes(&hash).await
+    }
+
     pub async fn mkdir_p(&self, path: &str) -> Result<()> {
         self.fs.mkdir_p(path).await?;
         self.emit("mkdir", path, None, None, None).await;

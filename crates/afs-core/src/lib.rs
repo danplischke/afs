@@ -34,7 +34,7 @@ pub mod vfs;
 pub use attribution::{Actor, ActorInit, ActorKind, BlameRange, EditOp, ToolCallInit, WriteCtx};
 pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};
 pub use collab::{Event, EventInit, Presence, EVENT_CHANNEL, PRESENCE_WINDOW_SECS};
-pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore};
+pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore, VerifyingStore};
 pub use encrypt::EncryptedStore;
 pub use engine::Fs;
 pub use error::{AfsError, Result};

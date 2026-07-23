@@ -209,6 +209,19 @@ impl PackStore {
                 for (h, offset, len) in &members {
                     if live.contains(h) {
                         let slice = bytes.slice(*offset as usize..(*offset + *len) as usize);
+                        // Verify-on-repack: never launder a corrupt chunk into a
+                        // fresh pack and then delete the evidence. Pack chunks are
+                        // content-addressed, so re-hash and refuse a mismatch
+                        // (audit M1).
+                        let actual = Hash::of(&slice);
+                        if actual != *h {
+                            return Err(AfsError::Corrupt(format!(
+                                "pack {} chunk {} failed its integrity check during repack (got {})",
+                                pack.to_hex(),
+                                h.to_hex(),
+                                actual.to_hex()
+                            )));
+                        }
                         self.index.delete(h).await?; // clear the old pointer
                         self.stage(*h, &slice, false).await?;
                     }

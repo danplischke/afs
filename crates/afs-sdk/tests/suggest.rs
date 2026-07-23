@@ -101,3 +101,25 @@ async fn suggest_and_accept_a_deletion() {
     ws.accept_suggestion(id, human_ctx).await.unwrap();
     assert!(ws.read("/gone.txt").await.is_err(), "removed on accept");
 }
+
+// SEC (security audit #6): a suggestion's author cannot approve their own
+// suggestion — the review gate requires a different reviewer, so an agent can't
+// rubber-stamp its own proposal into the working tree.
+#[tokio::test]
+async fn author_cannot_accept_their_own_suggestion() {
+    let (ws, _dir, _agent, agent_ctx, _human_ctx) = setup().await;
+    ws.write("/self.txt", b"base\n").await.unwrap();
+
+    let id = ws.suggest(agent_ctx, "/self.txt", b"changed\n", None).await.unwrap();
+
+    // the proposing actor accepting its own suggestion is rejected...
+    let err = ws.accept_suggestion(id, agent_ctx).await.unwrap_err();
+    assert!(matches!(err, afs_sdk::AfsError::InvalidArgument(_)), "got {err:?}");
+
+    // ...the working tree is untouched and it stays pending for a real reviewer.
+    assert_eq!(&ws.read("/self.txt").await.unwrap()[..], b"base\n");
+    assert_eq!(
+        ws.get_suggestion(id).await.unwrap().unwrap().status,
+        SuggestionStatus::Pending
+    );
+}

@@ -13,6 +13,22 @@
 //!
 //! The kernel overlay is the disposable *scratch*; afs's own object graph is the
 //! durable, versioned, attributed layer the delta lands in.
+//!
+//! # This is NOT a security sandbox
+//!
+//! Despite the crate name, this is a **copy-on-write view for capturing an
+//! agent's edits with attribution — not a containment boundary for untrusted
+//! code.** The command runs with the caller's own privileges in a plain
+//! `unshare -U -r -m` user+mount namespace: there is no `pivot_root`/`chroot`
+//! (the whole host filesystem stays reachable by absolute path, including this
+//! workspace's `meta.db`/`cas`), no network namespace (the process keeps full
+//! host network access), and no seccomp/capability drop. We only strip afs's own
+//! `AFS_ENCRYPTION_KEY` from the child's environment; everything else your
+//! process can reach, the command can too.
+//!
+//! Run only code you already trust here. To run genuinely untrusted code, put
+//! afs behind a real sandbox (bubblewrap, nsjail, a container, or a microVM) or
+//! drive it over the authenticated HTTP API instead.
 
 use afs_sdk::{FileKind, Workspace, WriteCtx};
 use anyhow::{bail, Context, Result};
@@ -202,6 +218,11 @@ fn overlay_command(
                           exec \"$@\"";
     let mut command = tokio::process::Command::new("unshare");
     command
+        // Don't hand afs's own at-rest encryption key to the child: the process
+        // inherits our environment, and the overlay is not a trust boundary, so
+        // leaking the key that protects the content store would be gratuitous.
+        // (Broader environment hygiene is the caller's job — see the module docs.)
+        .env_remove("AFS_ENCRYPTION_KEY")
         .args(["-U", "-r", "-m", "/bin/sh", "-c", SCRIPT, "afs-sandbox"])
         .arg(lower)
         .arg(upper)

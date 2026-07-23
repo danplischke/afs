@@ -160,9 +160,11 @@ enum Cmd {
     },
     /// Show per-line authorship (blame) for a file.
     Blame { path: String },
-    /// Run a command in an isolated copy-on-write sandbox over the workspace,
-    /// then import what it changed as an attributed commit (or `--discard`).
-    /// Usage: `afs sandbox --actor 1 -- <cmd> [args...]`
+    /// Run a command over a copy-on-write view of the workspace, then import what
+    /// it changed as an attributed commit (or `--discard`). NOTE: this is an
+    /// edit-capture view, not a security sandbox — the command runs with your
+    /// privileges and can reach the host; run only code you trust (see the
+    /// afs-sandbox docs). Usage: `afs sandbox --actor 1 -- <cmd> [args...]`
     Sandbox {
         /// Attribute imported changes to this actor id.
         #[arg(long)]
@@ -176,8 +178,9 @@ enum Cmd {
     },
     /// Run an agent in a live native overlay mount over the workspace: it works
     /// in a fast unprivileged kernel overlay while its changes stream into afs
-    /// (attributed) as it goes — not just on exit.
-    /// Usage: `afs overlay --actor 1 -- <agent-cmd> [args...]`
+    /// (attributed) as it goes — not just on exit. NOTE: an edit-capture view,
+    /// not a security sandbox — the agent runs with your privileges and can reach
+    /// the host; run only agents you trust. Usage: `afs overlay --actor 1 -- <cmd>`
     Overlay {
         /// Attribute the agent's changes to this actor id.
         #[arg(long)]

@@ -36,6 +36,7 @@ async fn imports_delta_with_attribution() {
             actor: Some(agent),
             discard: false,
             work_root: dir.path().join("sbx"),
+            isolate: false,
         },
         &cmd,
     )
@@ -79,6 +80,7 @@ async fn discard_leaves_workspace_untouched() {
             actor: None,
             discard: true,
             work_root: dir.path().join("sbx"),
+            isolate: false,
         },
         &cmd,
     )
@@ -163,6 +165,7 @@ async fn run_live_streams_changes_to_afs() {
             actor: Some(agent),
             work_root: dir.path().join("ovl"),
             sync_interval: std::time::Duration::from_millis(150),
+            isolate: false,
         },
         &cmd,
     )

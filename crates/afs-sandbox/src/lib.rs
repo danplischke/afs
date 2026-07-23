@@ -14,21 +14,26 @@
 //! The kernel overlay is the disposable *scratch*; afs's own object graph is the
 //! durable, versioned, attributed layer the delta lands in.
 //!
-//! # This is NOT a security sandbox
+//! # Two isolation levels
 //!
-//! Despite the crate name, this is a **copy-on-write view for capturing an
-//! agent's edits with attribution — not a containment boundary for untrusted
-//! code.** The command runs with the caller's own privileges in a plain
-//! `unshare -U -r -m` user+mount namespace: there is no `pivot_root`/`chroot`
-//! (the whole host filesystem stays reachable by absolute path, including this
-//! workspace's `meta.db`/`cas`), no network namespace (the process keeps full
-//! host network access), and no seccomp/capability drop. We only strip afs's own
-//! `AFS_ENCRYPTION_KEY` from the child's environment; everything else your
-//! process can reach, the command can too.
+//! **Default (`isolate: false`) — NOT a security boundary.** A plain
+//! `unshare -U -r -m` overlay: fast, and fine for code you already trust, but the
+//! command runs with your privileges with no `pivot_root`/`chroot` (the whole
+//! host filesystem stays reachable by absolute path, including this workspace's
+//! `meta.db`/`cas`), no network namespace, and no seccomp. We only strip afs's
+//! own `AFS_ENCRYPTION_KEY` from the child; everything else your process can
+//! reach, the command can too.
 //!
-//! Run only code you already trust here. To run genuinely untrusted code, put
-//! afs behind a real sandbox (bubblewrap, nsjail, a container, or a microVM) or
-//! drive it over the authenticated HTTP API instead.
+//! **Isolated (`isolate: true`, `afs sandbox --isolate`) — a real filesystem
+//! boundary.** Runs the command under [bubblewrap](https://github.com/containers/bubblewrap)
+//! ([`bwrap_available`]): a fresh namespace whose root is a tmpfs with only the
+//! host toolchain bind-mounted **read-only** and the copy-on-write overlay as the
+//! working dir. The rest of the host filesystem — `meta.db`/`cas`, the home dir,
+//! cloud/DB credentials — is simply absent, so untrusted code can't read or
+//! tamper with any of it. The delta is still captured in `upper/` and imported
+//! exactly as before. This is a *filesystem* boundary; the network namespace is
+//! left shared on purpose because agents typically need egress, so it does not by
+//! itself contain network-reachable resources.
 
 use afs_sdk::{FileKind, Workspace, WriteCtx};
 use anyhow::{bail, Context, Result};
@@ -45,6 +50,12 @@ pub struct RunOpts {
     pub discard: bool,
     /// Working root for `lower/upper/work/merged` (a temp dir).
     pub work_root: PathBuf,
+    /// Run under bubblewrap so the host filesystem (this workspace's `meta.db`/
+    /// `cas`, the home dir, credentials) is hidden from the command — a real
+    /// filesystem boundary for untrusted code. Requires `bwrap` (see
+    /// [`bwrap_available`]). When `false`, the plain copy-on-write overlay is used
+    /// (fast, but NOT a security boundary — see the module docs).
+    pub isolate: bool,
 }
 
 /// The result of a sandbox run.
@@ -110,8 +121,13 @@ pub async fn run(ws: &Workspace, opts: RunOpts, cmd: &[String]) -> Result<Outcom
         .await
         .context("materializing workspace into the sandbox lower layer")?;
 
-    // 2. run the command in an unprivileged overlay namespace
-    let exit_code = run_in_overlay(&lower, &upper, &work, &merged, cmd).await?;
+    // 2. run the command over the overlay — bubblewrap-isolated (a real
+    //    filesystem boundary) or a plain copy-on-write overlay, per `opts.isolate`.
+    let status = sandbox_command(opts.isolate, &lower, &upper, &work, &merged, cmd)?
+        .status()
+        .await
+        .context("spawning the sandbox")?;
+    let exit_code = status.code().unwrap_or(-1);
 
     // 3. import the captured delta (unless discarding)
     let (imported, files_changed) = if opts.discard {
@@ -140,6 +156,9 @@ pub struct LiveOpts {
     pub work_root: PathBuf,
     /// How often to sync the agent's changes into afs while it runs.
     pub sync_interval: Duration,
+    /// Run the agent under bubblewrap so the host filesystem is hidden — a real
+    /// filesystem boundary. Requires `bwrap` ([`bwrap_available`]). See [`RunOpts::isolate`].
+    pub isolate: bool,
 }
 
 /// Run `cmd` in a native overlay over `ws`'s working tree, streaming the agent's
@@ -173,7 +192,7 @@ pub async fn run_live(ws: &Workspace, opts: LiveOpts, cmd: &[String]) -> Result<
     };
     let mut sync = LiveSync::new(opts.actor, session);
 
-    let mut child = overlay_command(&lower, &upper, &work, &merged, cmd)
+    let mut child = sandbox_command(opts.isolate, &lower, &upper, &work, &merged, cmd)?
         .spawn()
         .context("spawning the overlay agent")?;
 
@@ -234,19 +253,102 @@ fn overlay_command(
     command
 }
 
-/// Mount the overlay in a user+mount namespace and exec `cmd` with cwd=merged.
-async fn run_in_overlay(
+/// Pick the command that runs `cmd` over the overlay: bubblewrap-isolated (a real
+/// filesystem boundary) when `isolate`, else the plain copy-on-write overlay.
+/// Errors if isolation is requested but `bwrap` isn't available.
+fn sandbox_command(
+    isolate: bool,
     lower: &Path,
     upper: &Path,
     work: &Path,
     merged: &Path,
     cmd: &[String],
-) -> Result<i32> {
-    let status = overlay_command(lower, upper, work, merged, cmd)
-        .status()
-        .await
-        .context("spawning the sandbox")?;
-    Ok(status.code().unwrap_or(-1))
+) -> Result<tokio::process::Command> {
+    if isolate {
+        if !bwrap_available() {
+            bail!(
+                "isolated run requested but bubblewrap (`bwrap`) is not available on PATH; \
+                 install bubblewrap >= 0.8.0 (for overlay support), or run without isolation"
+            );
+        }
+        Ok(bwrap_command(lower, upper, work, cmd))
+    } else {
+        Ok(overlay_command(lower, upper, work, merged, cmd))
+    }
+}
+
+/// Whether bubblewrap (`bwrap`) is on PATH for an isolated run. Overlay support
+/// additionally needs bwrap >= 0.8.0; an older bwrap fails the run loudly rather
+/// than silently dropping the boundary.
+pub fn bwrap_available() -> bool {
+    std::process::Command::new("bwrap")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Destination mountpoint for the overlay inside the bubblewrap sandbox.
+const BWRAP_WORKDIR: &str = "/afs-work";
+
+/// Build a bubblewrap command that runs `cmd` over an overlay of `lower` (read)
+/// plus `upper`/`work` (the writable delta we import afterward), in a real
+/// filesystem sandbox: a fresh namespace whose root is a tmpfs with only the host
+/// toolchain bind-mounted **read-only** and the overlay as the working dir. The
+/// rest of the host filesystem — this workspace's `meta.db`/`cas`, the home dir,
+/// cloud/DB credentials — is simply not present, so the command can't read or
+/// tamper with any of it.
+///
+/// **Scope.** This is a *filesystem* boundary. The network namespace is left
+/// shared on purpose (agents typically need egress, e.g. to call an API), so
+/// network-reachable resources are not isolated by this; drop `--unshare-net`-
+/// style isolation to a caller that knows the agent needs no network.
+fn bwrap_command(
+    lower: &Path,
+    upper: &Path,
+    work: &Path,
+    cmd: &[String],
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("bwrap");
+    command
+        .env_remove("AFS_ENCRYPTION_KEY")
+        .args([
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup",
+            "--die-with-parent",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ])
+        // Host toolchain, read-only. `-try` tolerates paths that are symlinks or
+        // absent on a given distro (e.g. /bin, /lib64, /sbin merged into /usr).
+        .args(["--ro-bind", "/usr", "/usr"])
+        .args(["--ro-bind-try", "/bin", "/bin"])
+        .args(["--ro-bind-try", "/sbin", "/sbin"])
+        .args(["--ro-bind-try", "/lib", "/lib"])
+        .args(["--ro-bind-try", "/lib64", "/lib64"])
+        // /etc read-only for DNS/TLS/user lookups the agent's tools need.
+        .args(["--ro-bind-try", "/etc", "/etc"])
+        // The copy-on-write overlay: `lower` is the read layer, `upper` captures
+        // the delta (imported after exit), mounted at BWRAP_WORKDIR.
+        .arg("--overlay-src")
+        .arg(lower)
+        .arg("--overlay")
+        .arg(upper)
+        .arg(work)
+        .arg(BWRAP_WORKDIR)
+        .args(["--chdir", BWRAP_WORKDIR])
+        .arg("--");
+    for arg in cmd {
+        command.arg(arg);
+    }
+    command
 }
 
 fn join_afs(dir: &str, name: &str) -> String {
@@ -445,4 +547,51 @@ async fn afs_rm_rf(ws: &Workspace, path: &str) -> Result<()> {
         Err(_) => {} // already gone
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    // The isolated runner's argv must set up a real filesystem boundary: a COW
+    // overlay with delta capture, a read-only host toolchain, fresh namespaces,
+    // and the user command after `--`. (bwrap can't be executed in CI, so we pin
+    // the command construction instead.)
+    #[test]
+    fn bwrap_command_builds_an_isolated_overlay_argv() {
+        let cmd = vec!["echo".to_string(), "hi".to_string()];
+        let c = bwrap_command(
+            Path::new("/w/lower"),
+            Path::new("/w/upper"),
+            Path::new("/w/work"),
+            &cmd,
+        );
+        let std = c.as_std();
+        assert_eq!(std.get_program(), OsStr::new("bwrap"));
+        let args: Vec<String> = std
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        // COW overlay with the writable delta layer we import afterward.
+        assert!(
+            args.windows(2).any(|w| w[0] == "--overlay-src" && w[1] == "/w/lower"),
+            "read layer: {args:?}"
+        );
+        assert!(
+            args.windows(4)
+                .any(|w| w[0] == "--overlay" && w[1] == "/w/upper" && w[2] == "/w/work" && w[3] == BWRAP_WORKDIR),
+            "writable overlay: {args:?}"
+        );
+        // Host toolchain is bind-mounted read-only (never read-write).
+        assert!(args.windows(3).any(|w| w[0] == "--ro-bind" && w[1] == "/usr" && w[2] == "/usr"));
+        assert!(!args.iter().any(|a| a == "--bind"), "nothing host is writable: {args:?}");
+        // Real namespaces + working dir inside the overlay.
+        assert!(args.contains(&"--unshare-pid".to_string()));
+        assert!(args.windows(2).any(|w| w[0] == "--chdir" && w[1] == BWRAP_WORKDIR));
+        // The user command comes last, after the `--` separator, unmodified.
+        let sep = args.iter().position(|a| a == "--").expect("`--` separator");
+        assert_eq!(&args[sep + 1..], &["echo".to_string(), "hi".to_string()]);
+    }
 }

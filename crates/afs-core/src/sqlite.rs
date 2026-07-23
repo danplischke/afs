@@ -531,6 +531,23 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
+        // Resolve the id under the lock, then reuse get_actor for the row mapping.
+        let id: Option<i64> = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT id FROM actor WHERE auth_subject = ?1",
+                params![subject],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        };
+        match id {
+            Some(id) => self.get_actor(id).await,
+            None => Ok(None),
+        }
+    }
+
     async fn create_session(
         &self,
         actor_id: i64,

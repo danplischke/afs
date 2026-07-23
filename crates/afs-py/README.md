@@ -25,10 +25,17 @@ Wheels: `maturin build --release` (abi3, one wheel works on CPython ≥ 3.9).
 import afs
 
 ws = await afs.Workspace.open_local("meta.db", "cas")
-# ...or multi-writer: await afs.Workspace.open_pg(dsn, "cas")
+# ...or multi-writer on Postgres with S3-shared content (the production combo):
+#   cfg = afs.S3Config(bucket="my-bucket", region="us-east-1")   # + endpoint/keys
+#   ws  = await afs.Workspace.open_pg_s3(dsn, cfg)               # or open_pg_s3_packed
+# object-store constructors verify content integrity on read (a bit-rotted object
+# errors instead of being served). open_object_memory(db) runs the same adapter
+# with no network, for local dev/tests.
 
-# Inject the identity you resolved in your endpoint:
-ctx = afs.WriteCtx.session(actor_id, session_id)   # or afs.WriteCtx.actor(id)
+# Map your app's user id to an afs actor (idempotent; no side table needed):
+actor_id = await ws.find_or_create_human("user_42", "Dan")   # your id -> afs actor
+# then inject the identity you resolved in your endpoint:
+ctx = afs.WriteCtx.session(actor_id, session_id)   # or afs.WriteCtx.actor(actor_id)
 await ws.write_as(ctx, "/notes.txt", b"hello")      # attributed -> blame + audit
 
 diff = await ws.diff("main", "feature")             # [{"path","status"}, ...]
@@ -38,6 +45,71 @@ await ws.accept_suggestion(sid, afs.WriteCtx.actor(reviewer))  # applied, credit
 
 Errors map to Python exceptions: missing path → `FileNotFoundError`, bad arg →
 `ValueError`, a stale suggestion base → `afs.ConflictError`.
+
+## FastAPI router (bring your own auth)
+
+afs has no built-in authentication — a blame trail is only trustworthy if the
+identity behind each write is, and that's yours to own. `afs.fastapi.build_router`
+gives you every workspace endpoint wired up, with attribution driven by an auth
+dependency **you** provide:
+
+```python
+from fastapi import FastAPI, Header, HTTPException
+import afs
+from afs.fastapi import build_router
+
+async def authn(x_actor_id: int = Header(...)) -> afs.WriteCtx:
+    # decode your JWT / session / agent token -> the afs actor to attribute to
+    if x_actor_id is None:
+        raise HTTPException(401)
+    return afs.WriteCtx.actor(x_actor_id)
+
+app = FastAPI()
+app.include_router(build_router(ws, authn=authn), prefix="/fs")
+```
+
+Every mutating route depends on `authn` and passes its `WriteCtx` straight to the
+workspace — the request body never names an actor, so a client can't forge
+attribution. Reads are open by default; pass `reader=<dependency>` to gate them,
+or `dependencies=[...]` (forwarded to `APIRouter`) to gate everything. Needs the
+`fastapi` extra (`pip install "afs[fastapi]"`). See `examples/fastapi_router.py`.
+
+## Live change feed (push)
+
+On Postgres, `subscribe` gives a real push feed (LISTEN/NOTIFY) — `await recv()`
+blocks until the next batch instead of polling `watch`. Ideal behind a FastAPI
+SSE/WebSocket endpoint:
+
+```python
+sub = await ws.subscribe(after_seq=0, branch="main")   # PG only; raises on SQLite
+while True:
+    events = await sub.recv()      # woken by NOTIFY; [] once the connection closes
+    if not events:
+        break
+    for e in events:
+        ...                        # push to the client
+```
+
+## Run an agent in a live overlay
+
+`afs.overlay.run` launches an agent in a fast native kernel overlay while its
+edits stream into afs, attributed to an actor — the way agents are meant to work
+day to day. It shells out to the `afs` CLI (the overlay is host orchestration,
+not embedded in the extension), operating on a workspace **directory** the API
+also opens:
+
+```python
+import afs
+from afs.overlay import run
+
+ws_dir = "./ws"
+api   = await afs.Workspace.open_local(f"{ws_dir}/meta.db", f"{ws_dir}/cas")
+actor = await api.find_or_create_agent("agent-token", "claude", "opus")
+code  = await run(ws_dir, actor, ["claude", "-p", "refactor the parser"])
+```
+
+Requires the `afs` binary on PATH and a Linux host with unprivileged
+user-namespace overlays.
 
 ## Mount orchestration
 
@@ -55,10 +127,14 @@ the suggestion review queue, the live feed, and presence).
 
 ## API surface
 
-`Workspace`: `open_local` · `open_local_packed` · `open_pg` · `read` · `write` ·
+`Workspace`: `open_local` · `open_local_packed` · `open_pg` · `open_s3` ·
+`open_s3_packed` · `open_pg_s3` · `open_pg_s3_packed` · `open_object_memory` ·
+`read` · `write` ·
 `write_as` · `mkdir_p` · `ls` · `stat` · `remove` · `rename` · `commit` · `log` ·
 `status` · `diff` · `diff_file` · `create_branch` · `checkout` · `branches` ·
-`current_branch` · `create_human` · `create_agent` · `create_session` · `blame` ·
-`watch` · `presence` · `touch` · `suggest` · `suggest_delete` · `list_suggestions` ·
+`current_branch` · `create_human` · `create_agent` · `actor_by_subject` · `find_or_create_human` ·
+`find_or_create_agent` · `create_session` · `blame` ·
+`watch` · `subscribe` · `presence` · `touch` · `suggest` · `suggest_delete` ·
+`list_suggestions` ·
 `get_suggestion` · `suggestion_diff` · `accept_suggestion` · `reject_suggestion` ·
-`mount` · `serve_nfs`. Plus `WriteCtx`, `Mount`, `fuse_mountable()`.
+`mount` · `serve_nfs`. Plus `WriteCtx`, `S3Config`, `Mount`, `fuse_mountable()`.

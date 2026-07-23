@@ -6,17 +6,18 @@
 //! milestones add commits and attribution behind the same façade.
 
 use afs_core::{
-    ContentStore, Fs, LocalCasStore, MetadataStore, ObjectContentStore, PostgresMetadataStore,
-    Result, S3Config, SqliteMetadataStore,
+    ContentStore, Fs, LocalCasStore, MetadataStore, PostgresMetadataStore, Result,
+    SqliteMetadataStore,
 };
 use std::path::Path;
 use std::sync::Arc;
 
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
-    DirEntry, EditOp, EncryptedStore, Event, EventInit, FileKind, GcStats, Hash, Inode, MemStore,
-    MergeOutcome, PackStore, Presence, Suggestion, SuggestionInit, SuggestionStatus, TieredStore,
-    ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
+    DirEntry, EditOp, EncryptedStore, Event, EventInit, EventSubscription, FileKind, GcStats, Hash,
+    Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence, S3Config, Suggestion,
+    SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit, VerifyingStore, VersioningMode,
+    WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -31,6 +32,10 @@ type Content = Arc<dyn ContentStore>;
 #[derive(Clone)]
 pub struct Workspace {
     fs: Fs<Meta, Content>,
+    /// The concrete Postgres store, kept when opened on Postgres so the
+    /// `LISTEN/NOTIFY` change-feed subscription is reachable (it is PG-specific
+    /// and not on the object-safe `MetadataStore` trait). `None` otherwise.
+    pg: Option<Arc<PostgresMetadataStore>>,
 }
 
 impl Workspace {
@@ -39,7 +44,7 @@ impl Workspace {
     pub async fn open(meta: Meta, content: Content) -> Result<Self> {
         let fs = Fs::new(meta, content);
         fs.init().await?;
-        Ok(Self { fs })
+        Ok(Self { fs, pg: None })
     }
 
     /// SQLite metadata + content-addressed blobs under a local directory.
@@ -108,7 +113,49 @@ impl Workspace {
 
     /// Postgres metadata (multi-writer) over the given content backend.
     pub async fn open_pg(dsn: &str, content: Content) -> Result<Self> {
-        let meta: Meta = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let mut ws = Self::open(pg.clone(), content).await?;
+        ws.pg = Some(pg);
+        Ok(ws)
+    }
+
+    /// Postgres metadata (multi-writer) + an S3-compatible object store for
+    /// content — the production pairing for a shared human+agent workspace: many
+    /// writers on one database, one shared content store. Reads are integrity-
+    /// verified (a bit-rotted object surfaces as `Corrupt`, not as authentic).
+    pub async fn open_pg_s3(dsn: &str, cfg: S3Config) -> Result<Self> {
+        let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
+        let mut ws = Self::open(pg.clone(), content).await?;
+        ws.pg = Some(pg);
+        Ok(ws)
+    }
+
+    /// Postgres metadata + a **packed** S3 object store (few large PUTs instead of
+    /// many tiny ones), with the per-chunk index in a local directory. The
+    /// recommended object-storage layout; seal the open pack with [`Workspace::flush`]
+    /// (or `commit`) and reclaim deleted space with [`Workspace::repack`].
+    pub async fn open_pg_s3_packed(
+        dsn: &str,
+        cfg: S3Config,
+        index_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let data: Content = Arc::new(ObjectContentStore::s3(cfg)?);
+        let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(PackStore::new(data, index))));
+        let mut ws = Self::open(pg.clone(), content).await?;
+        ws.pg = Some(pg);
+        Ok(ws)
+    }
+
+    /// SQLite metadata + an **in-memory** object store — the same object-store
+    /// adapter as [`Workspace::open_s3`] minus the network, so it exercises the
+    /// real object-storage content path (integrity verification included). For
+    /// local development and tests without a live bucket; content is not durable.
+    pub async fn open_object_memory(db_path: impl AsRef<Path>) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::in_memory())));
         Self::open(meta, content).await
     }
 
@@ -359,6 +406,31 @@ impl Workspace {
         self.fs.get_actor(id).await
     }
 
+    /// Look up an actor by external identity (`auth_subject`), if registered.
+    pub async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
+        self.fs.actor_by_subject(subject).await
+    }
+
+    /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
+    /// returns the existing actor for that subject, or creates one. Race-safe, so
+    /// you don't need to keep a user→actor side table.
+    pub async fn find_or_create_human(&self, auth_subject: &str, name: &str) -> Result<i64> {
+        self.fs.find_or_create_human(auth_subject, name).await
+    }
+
+    /// Idempotently map an external identity to an **agent** actor.
+    pub async fn find_or_create_agent(
+        &self,
+        auth_subject: &str,
+        name: &str,
+        model: &str,
+        controller: Option<i64>,
+    ) -> Result<i64> {
+        self.fs
+            .find_or_create_agent(auth_subject, name, model, controller)
+            .await
+    }
+
     pub async fn create_session(&self, actor_id: i64, client: Option<&str>) -> Result<i64> {
         self.fs.create_session(actor_id, client).await
     }
@@ -446,6 +518,23 @@ impl Workspace {
     /// `NOTIFY afs_events` so consumers can be pushed instead of polling).
     pub async fn watch(&self, after_seq: i64) -> Result<Vec<Event>> {
         self.fs.events_since(after_seq, 1000).await
+    }
+
+    /// A **push** subscription to the change feed, backed by Postgres
+    /// `LISTEN/NOTIFY` — call [`EventSubscription::recv`] to block until the next
+    /// batch of events instead of polling [`watch`](Self::watch). Optionally
+    /// branch-scoped. Errors on non-Postgres backends (use `watch` there).
+    pub async fn subscribe(
+        &self,
+        after_seq: i64,
+        branch: Option<&str>,
+    ) -> Result<EventSubscription> {
+        match &self.pg {
+            Some(pg) => pg.subscribe(after_seq, branch.map(str::to_string)).await,
+            None => Err(AfsError::InvalidArgument(
+                "subscribe requires the Postgres backend; use watch() to poll".into(),
+            )),
+        }
     }
 
     /// Record an arbitrary event on the change feed.

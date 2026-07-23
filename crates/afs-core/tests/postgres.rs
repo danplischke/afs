@@ -145,6 +145,18 @@ async fn postgres_backend() {
             .controller_actor_id,
         Some(human)
     );
+
+    // External-identity mapping over Postgres (V9 unique index): the human was
+    // registered with auth_subject "dev@x", so it resolves and find-or-create is
+    // idempotent; a fresh subject creates a distinct actor.
+    assert_eq!(
+        fs.actor_by_subject("dev@x").await.unwrap().unwrap().id,
+        human
+    );
+    assert_eq!(fs.find_or_create_human("dev@x", "again").await.unwrap(), human);
+    let other = fs.find_or_create_human("someone-else", "Sam").await.unwrap();
+    assert_ne!(other, human);
+    assert!(fs.actor_by_subject("nobody").await.unwrap().is_none());
     assert_eq!(fs.edit_ops(agent, Some(sess)).await.unwrap().len(), 1);
 
     // --- agent-suggestion review queue over Postgres ------------------------

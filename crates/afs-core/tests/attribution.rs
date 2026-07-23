@@ -1,7 +1,7 @@
 //! Attribution & blame: per-line human-vs-agent authorship, provenance, the
 //! edit-op log, and reverting an agent's session.
 
-use afs_core::{ActorKind, Fs, MemStore, SqliteMetadataStore, WriteCtx};
+use afs_core::{ActorInit, ActorKind, Fs, MemStore, SqliteMetadataStore, WriteCtx};
 use std::sync::Arc;
 
 async fn fixture() -> Fs<SqliteMetadataStore, Arc<MemStore>> {
@@ -288,4 +288,55 @@ async fn moved_line_keeps_its_author() {
     assert_eq!(b.len(), 2, "got {b:?}");
     assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (claude, 1, 1));
     assert_eq!((b[1].actor.id, b[1].line_start, b[1].line_end), (alice, 2, 3));
+}
+
+// find_or_create_actor maps an external identity (auth_subject) to exactly one
+// actor, idempotently — so an app can bind its own user id without a side table.
+#[tokio::test]
+async fn find_or_create_actor_is_idempotent_by_subject() {
+    let fs = fixture().await;
+
+    // Unknown subject resolves to nothing.
+    assert!(fs.actor_by_subject("user_42").await.unwrap().is_none());
+
+    // First call creates; a second with the same subject returns the same id.
+    let a1 = fs.find_or_create_human("user_42", "Dan").await.unwrap();
+    let a2 = fs.find_or_create_human("user_42", "Dan again").await.unwrap();
+    assert_eq!(a1, a2);
+
+    // A different subject is a different actor.
+    let b = fs.find_or_create_human("user_99", "Sam").await.unwrap();
+    assert_ne!(a1, b);
+
+    // The lookup now resolves and carries the identity.
+    let found = fs.actor_by_subject("user_42").await.unwrap().unwrap();
+    assert_eq!(found.id, a1);
+    assert_eq!(found.auth_subject.as_deref(), Some("user_42"));
+    assert_eq!(found.kind, ActorKind::Human);
+
+    // Agents key on the subject the same way.
+    let g1 = fs
+        .find_or_create_agent("tok", "claude", "opus", Some(a1))
+        .await
+        .unwrap();
+    let g2 = fs
+        .find_or_create_agent("tok", "claude", "opus", Some(a1))
+        .await
+        .unwrap();
+    assert_eq!(g1, g2);
+    assert_ne!(g1, a1);
+
+    // A plain create with a duplicate subject is refused by the unique index,
+    // so identities can't silently fork.
+    assert!(
+        fs.create_human("dupe", Some("user_42")).await.is_err(),
+        "unique index must reject a second actor for an existing subject"
+    );
+
+    // find_or_create requires a subject to key on.
+    assert!(
+        fs.find_or_create_actor(ActorInit::human("x", None))
+            .await
+            .is_err()
+    );
 }

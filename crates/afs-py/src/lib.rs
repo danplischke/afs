@@ -16,10 +16,11 @@
 //! JSON-serializable in an API response. Mounting (FUSE) and NFS serving are
 //! exposed so orchestration can live in Python too.
 
-use afs_core::{LocalCasStore, PostgresMetadataStore};
+use afs_core::LocalCasStore;
 use afs_sdk::{
-    Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, Inode, Presence,
-    Suggestion, SuggestionStatus, Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
+    Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, EventSubscription,
+    Inode, Presence, S3Config as CoreS3Config, Suggestion, SuggestionStatus,
+    Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -220,6 +221,92 @@ impl WriteCtx {
     }
 }
 
+// --- change-feed push subscription ------------------------------------------
+
+/// A live push subscription to the change feed (Postgres `LISTEN/NOTIFY`).
+/// `await sub.recv()` blocks until the next batch of events arrives — a real
+/// push, not a poll. Returned by `Workspace.subscribe`.
+#[pyclass]
+struct Subscription {
+    inner: Arc<tokio::sync::Mutex<EventSubscription>>,
+}
+
+#[pymethods]
+impl Subscription {
+    /// Block until the next batch of events, returned oldest-first as dicts.
+    /// Returns `[]` once the feed's connection has closed.
+    fn recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let sub = self.inner.clone();
+        future_into_py(py, async move {
+            let events = {
+                let mut guard = sub.lock().await;
+                guard.recv().await.map_err(to_pyerr)?
+            };
+            Python::attach(|py| {
+                events
+                    .iter()
+                    .map(|e| event_dict(py, e))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })
+    }
+}
+
+// --- S3 config --------------------------------------------------------------
+
+/// Connection settings for an S3-compatible object store (AWS S3, Cloudflare R2,
+/// GCS S3 API, MinIO). Pass to `Workspace.open_s3` / `open_pg_s3` (and their
+/// `_packed` forms). Credentials fall back to the environment / instance role
+/// when omitted.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct S3Config {
+    inner: CoreS3Config,
+}
+
+#[pymethods]
+impl S3Config {
+    #[new]
+    #[pyo3(signature = (
+        bucket,
+        region,
+        endpoint = None,
+        allow_http = false,
+        access_key_id = None,
+        secret_access_key = None,
+        prefix = None,
+    ))]
+    fn new(
+        bucket: String,
+        region: String,
+        endpoint: Option<String>,
+        allow_http: bool,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        prefix: Option<String>,
+    ) -> Self {
+        Self {
+            inner: CoreS3Config {
+                bucket,
+                region,
+                endpoint,
+                allow_http,
+                access_key_id,
+                secret_access_key,
+                prefix,
+            },
+        }
+    }
+
+    // Deliberately omits credentials.
+    fn __repr__(&self) -> String {
+        format!(
+            "S3Config(bucket={:?}, region={:?}, endpoint={:?}, prefix={:?})",
+            self.inner.bucket, self.inner.region, self.inner.endpoint, self.inner.prefix
+        )
+    }
+}
+
 // --- FUSE mount handle ------------------------------------------------------
 
 /// A live FUSE mount. Unmounts when `unmount()` is called or the object is
@@ -305,9 +392,96 @@ impl Workspace {
         cas_dir: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         future_into_py(py, async move {
-            let meta = Arc::new(PostgresMetadataStore::connect(&dsn).await.map_err(to_pyerr)?);
             let content = Arc::new(LocalCasStore::open(&cas_dir).await.map_err(to_pyerr)?);
-            let ws = CoreWorkspace::open(meta, content).await.map_err(to_pyerr)?;
+            // Via the SDK constructor so the workspace retains its Postgres handle
+            // (needed for the `subscribe` LISTEN/NOTIFY push feed).
+            let ws = CoreWorkspace::open_pg(&dsn, content)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + an S3-compatible object store for content. Reads are
+    /// integrity-verified (a bit-rotted object errors instead of being served).
+    #[staticmethod]
+    fn open_s3<'py>(
+        py: Python<'py>,
+        db_path: String,
+        cfg: S3Config,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_s3(&db_path, cfg.inner)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + a **packed** S3 object store (few large PUTs instead of
+    /// many tiny ones) with the per-chunk index under `index_dir`. Call
+    /// `commit`/`flush` to seal the open pack and `repack` to reclaim space.
+    #[staticmethod]
+    fn open_s3_packed<'py>(
+        py: Python<'py>,
+        db_path: String,
+        cfg: S3Config,
+        index_dir: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_s3_packed(&db_path, cfg.inner, &index_dir)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// Postgres metadata (multi-writer) + an S3-compatible object store — the
+    /// production pairing for a shared human+agent workspace: many writers on one
+    /// database, one shared content store.
+    #[staticmethod]
+    fn open_pg_s3<'py>(
+        py: Python<'py>,
+        dsn: String,
+        cfg: S3Config,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_pg_s3(&dsn, cfg.inner)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// Postgres metadata + a **packed** S3 object store with the per-chunk index
+    /// under `index_dir`. The recommended object-storage layout for a team.
+    #[staticmethod]
+    fn open_pg_s3_packed<'py>(
+        py: Python<'py>,
+        dsn: String,
+        cfg: S3Config,
+        index_dir: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_pg_s3_packed(&dsn, cfg.inner, &index_dir)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + an **in-memory** object store — the same object-store
+    /// adapter as `open_s3` minus the network, for local dev and tests without a
+    /// live bucket. Content is not durable.
+    #[staticmethod]
+    fn open_object_memory<'py>(
+        py: Python<'py>,
+        db_path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_object_memory(&db_path)
+                .await
+                .map_err(to_pyerr)?;
             Python::attach(|py| Py::new(py, Workspace { inner: ws }))
         })
     }
@@ -557,6 +731,54 @@ impl Workspace {
         })
     }
 
+    /// Look up an actor by external identity (`auth_subject`); returns a dict or
+    /// `None`. Use this (or `find_or_create_*`) to map your app's user id to an
+    /// afs actor without keeping a side table.
+    fn actor_by_subject<'py>(&self, py: Python<'py>, subject: String) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let found = ws.actor_by_subject(&subject).await.map_err(to_pyerr)?;
+            Python::attach(|py| match found {
+                Some(a) => Ok(Some(actor_dict(py, &a)?)),
+                None => Ok(None),
+            })
+        })
+    }
+
+    /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
+    /// returns the existing actor for that subject, or creates one. Race-safe.
+    fn find_or_create_human<'py>(
+        &self,
+        py: Python<'py>,
+        auth_subject: String,
+        display_name: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            ws.find_or_create_human(&auth_subject, &display_name)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Idempotently map an external identity to an **agent** actor.
+    #[pyo3(signature = (auth_subject, display_name, model, controller=None))]
+    fn find_or_create_agent<'py>(
+        &self,
+        py: Python<'py>,
+        auth_subject: String,
+        display_name: String,
+        model: String,
+        controller: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            ws.find_or_create_agent(&auth_subject, &display_name, &model, controller)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
     /// Open a session for an actor; returns its id.
     #[pyo3(signature = (actor_id, client=None))]
     fn create_session<'py>(
@@ -593,6 +815,34 @@ impl Workspace {
         future_into_py(py, async move {
             let events = ws.watch(after_seq).await.map_err(to_pyerr)?;
             Python::attach(|py| events.iter().map(|e| event_dict(py, e)).collect::<PyResult<Vec<_>>>())
+        })
+    }
+
+    /// A **push** subscription to the change feed (Postgres `LISTEN/NOTIFY`):
+    /// `await`ing the returned object's `recv()` blocks until the next batch of
+    /// events, instead of polling `watch`. Optionally branch-scoped. Raises on
+    /// non-Postgres backends (use `watch` there).
+    #[pyo3(signature = (after_seq=0, branch=None))]
+    fn subscribe<'py>(
+        &self,
+        py: Python<'py>,
+        after_seq: i64,
+        branch: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let sub = ws
+                .subscribe(after_seq, branch.as_deref())
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| {
+                Py::new(
+                    py,
+                    Subscription {
+                        inner: Arc::new(tokio::sync::Mutex::new(sub)),
+                    },
+                )
+            })
         })
     }
 
@@ -779,10 +1029,15 @@ fn fuse_mountable() -> bool {
     afs_fuse::mountable()
 }
 
+/// The compiled extension is imported as `afs._afs`; the pure-Python package
+/// `afs` (see `python/afs/__init__.py`) re-exports everything from it and adds
+/// optional integrations like `afs.fastapi`.
 #[pymodule]
-fn afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Workspace>()?;
     m.add_class::<WriteCtx>()?;
+    m.add_class::<S3Config>()?;
+    m.add_class::<Subscription>()?;
     m.add_class::<Mount>()?;
     m.add_function(wrap_pyfunction!(fuse_mountable, m)?)?;
     m.add("AfsError", m.py().get_type::<AfsError>())?;

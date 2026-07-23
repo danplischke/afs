@@ -1,7 +1,7 @@
-// Inline review of a pending agent suggestion — the VSCode "review agent edits"
-// experience, rendered *in the document*: unchanged text reads normally, the
-// agent's changes appear inline (old text struck through in red, new text in
-// green), and you Keep or Discard each change right there.
+// Inline review of a pending agent suggestion — rendered natively **in a Plate
+// editor**. The proposal is a Plate value (unchanged text deserialized from
+// Markdown; each change a `suggestion_change` element with word-level
+// insert/delete marks). You Keep or Discard each change in place, then Apply.
 //
 // Keep-all applies through afs's native accept (atomic, credits the agent). A
 // partial keep is reconstructed server-side and written *as the agent*, so the
@@ -9,13 +9,25 @@
 // changes, never authors them.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { diffWordsWithSpace } from "diff";
+import { Plate, PlateContent, usePlateEditor } from "platejs/react";
+import { BasicBlocksPlugin, BasicMarksPlugin } from "@platejs/basic-nodes/react";
 import { useSession } from "../session";
 import { AfsError } from "../lib/afsClient";
 import { ActorChip } from "../components/ActorBadge";
 import { DiffText } from "../panels/DiffText";
-import { renderProse } from "./prose";
+import { buildSuggestionValue } from "./buildSuggestionValue";
+import { SuggestChangePlugin, SuggestDeletePlugin, SuggestInsertPlugin } from "./suggestionPlugins";
 import type { SuggestionDetail } from "../lib/types";
+
+const reviewPlugins = [
+  BasicBlocksPlugin,
+  BasicMarksPlugin,
+  SuggestInsertPlugin,
+  SuggestDeletePlugin,
+  SuggestChangePlugin,
+];
+
+const EMPTY = [{ type: "p", children: [{ text: "" }] }];
 
 export function ReviewOverlay({
   id,
@@ -28,9 +40,17 @@ export function ReviewOverlay({
 }) {
   const { client, token } = useSession();
   const [detail, setDetail] = useState<SuggestionDetail | null>(null);
-  const [keep, setKeep] = useState<Record<number, boolean>>({});
+  const [decisions, setDecisions] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const editor = usePlateEditor({ plugins: reviewPlugins, value: EMPTY });
+
+  // Toggling a change updates React state; an effect mirrors it to the plugin so
+  // the in-editor ✓/✗ re-render.
+  const toggle = useCallback((hunk: number, keep: boolean) => {
+    setDecisions((d) => ({ ...d, [hunk]: keep }));
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -40,9 +60,9 @@ export function ReviewOverlay({
       .then((d) => {
         if (!live) return;
         setDetail(d);
-        const k: Record<number, boolean> = {};
-        for (let i = 0; i < (d.hunks ?? 0); i++) k[i] = true; // default: keep everything
-        setKeep(k);
+        const init: Record<number, boolean> = {};
+        for (let i = 0; i < (d.hunks ?? 0); i++) init[i] = true;
+        setDecisions(init);
       })
       .catch((e) => live && setError(e instanceof Error ? e.message : String(e)));
     return () => {
@@ -50,16 +70,28 @@ export function ReviewOverlay({
     };
   }, [client, id]);
 
+  // Build the Plate value + wire the toggle callback once the proposal loads.
+  useEffect(() => {
+    if (!detail?.segments) return;
+    editor.tf.setValue(buildSuggestionValue(detail.segments));
+    editor.setOption(SuggestChangePlugin, "onToggle", toggle);
+  }, [editor, detail, toggle]);
+
+  // Push the current decisions into the plugin (drives the in-editor ✓/✗).
+  useEffect(() => {
+    editor.setOption(SuggestChangePlugin, "decisions", decisions);
+  }, [editor, decisions]);
+
   const total = detail?.hunks ?? 0;
   const keptIdx = useMemo(
-    () => Object.entries(keep).filter(([, v]) => v).map(([k]) => Number(k)),
-    [keep],
+    () => Object.entries(decisions).filter(([, v]) => v).map(([k]) => Number(k)),
+    [decisions],
   );
   const setAll = useCallback(
     (v: boolean) => {
-      const k: Record<number, boolean> = {};
-      for (let i = 0; i < total; i++) k[i] = v;
-      setKeep(k);
+      const next: Record<number, boolean> = {};
+      for (let i = 0; i < total; i++) next[i] = v;
+      setDecisions(next);
     },
     [total],
   );
@@ -134,53 +166,10 @@ export function ReviewOverlay({
         </span>
       </div>
       {error && <div className="notice err">{error}</div>}
-      <div className="suggestion-doc plate-content">
-        {detail.segments.map((seg, i) => {
-          if (seg.hunk === null) {
-            // Unchanged text — rendered like the document.
-            return <div className="sug-equal" key={`e${i}`}>{renderProse(seg.del)}</div>;
-          }
-          const h = seg.hunk;
-          const on = keep[h];
-          // Word-level diff of the removed vs added lines, so only the changed
-          // words are colored — the rest reads as normal text.
-          const parts = diffWordsWithSpace(seg.del.join("\n"), seg.add.join("\n"));
-          return (
-            <div className={`sug-change ${on ? "kept" : "discarded"}`} key={`h${i}`}>
-              <span className="sug-controls" role="group" aria-label={`change ${h + 1}`}>
-                <button
-                  className={on ? "active" : ""}
-                  onClick={() => setKeep((k) => ({ ...k, [h]: true }))}
-                  title="Keep — accept the agent's change"
-                >
-                  ✓
-                </button>
-                <button
-                  className={!on ? "active" : ""}
-                  onClick={() => setKeep((k) => ({ ...k, [h]: false }))}
-                  title="Discard — keep the original"
-                >
-                  ✗
-                </button>
-              </span>
-              <span className="sug-text">
-                {parts.map((p, j) =>
-                  p.removed ? (
-                    <del className="w-del" key={j}>
-                      {p.value}
-                    </del>
-                  ) : p.added ? (
-                    <ins className="w-add" key={j}>
-                      {p.value}
-                    </ins>
-                  ) : (
-                    <span key={j}>{p.value}</span>
-                  ),
-                )}
-              </span>
-            </div>
-          );
-        })}
+      <div className="suggestion-doc">
+        <Plate editor={editor}>
+          <PlateContent className="plate-content" readOnly />
+        </Plate>
       </div>
     </div>
   );

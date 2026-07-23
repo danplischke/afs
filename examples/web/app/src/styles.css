@@ -215,50 +215,22 @@ code {
 
 .editor-surface {
   position: relative;
-  padding: 14px 20px 40vh 20px;
+  padding: 0 20px 40vh 20px;
 }
-.editor-surface.with-gutter {
-  padding-left: 184px;
-}
-.attribution-gutter {
-  position: absolute;
-  left: 8px;
-  top: 14px;
-  width: 168px;
-}
-.gutter-row {
-  position: absolute;
-  left: 0;
-  width: 168px;
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding-top: 1px;
-}
-.gutter-bar {
-  width: 3px;
-  align-self: stretch;
+/* Native inline attribution: the AttributionPlugin decorates authored text with
+   an author-colored underline (rendered through Plate's leaf pipeline). */
+.attributed {
   border-radius: 2px;
-  min-height: 16px;
 }
-.gutter-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 150px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  font-size: 11px;
-  line-height: 1.5;
-  overflow: hidden;
-}
-.gutter-chip.unattributed {
-  color: var(--muted);
-}
-.gutter-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* The caret line's author, from useEditorSelection (no DOM measurement). */
+.active-author {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 2px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(2px);
 }
 
 .plate-content {
@@ -305,26 +277,6 @@ code {
   padding: 10px 12px;
   border-radius: var(--radius);
   overflow-x: auto;
-}
-
-/* --- inline attribution (GitLens-style current-line annotation) ----------- */
-
-.inline-blame {
-  position: absolute;
-  right: 20px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11.5px;
-  padding: 0 6px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--panel) 78%, transparent);
-  pointer-events: none;
-  opacity: 0.85;
-  white-space: nowrap;
-}
-.inline-blame-meta {
-  color: var(--muted);
 }
 
 /* --- inline suggestion review (VSCode-style agent edits) ------------------ */
@@ -391,101 +343,29 @@ code {
   font-size: 12.5px;
   line-height: 1.55;
 }
-.rl {
-  display: flex;
-  padding: 0 16px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.rl-sign {
-  width: 16px;
-  flex-shrink: 0;
-  color: var(--muted);
-  user-select: none;
-}
-.rl.ctx {
-  color: var(--muted);
-}
-.rl.del {
-  background: var(--del-bg);
-  color: var(--del-ink);
-}
-.rl.add {
-  background: var(--add-bg);
-  color: var(--add-ink);
-}
-
-.hunk {
-  position: relative;
-  margin: 6px 0;
-  border: 1px solid var(--hairline);
-  border-left-width: 3px;
-  border-radius: 6px;
-  overflow: hidden;
-}
-.hunk.kept {
-  border-left-color: var(--add-ink);
-}
-.hunk.discarded {
-  border-left-color: var(--muted);
-}
-.hunk-actions {
-  display: flex;
-  gap: 4px;
-  padding: 4px 8px;
-  background: color-mix(in srgb, var(--muted) 8%, transparent);
-  border-bottom: 1px solid var(--hairline);
-}
-.hunk-actions button {
-  font-size: 11px;
-  padding: 1px 8px;
-}
-.hunk-actions button.active {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-.hunk-lines {
-  padding: 4px 0;
-}
-/* Dim the lines that won't survive the current keep/discard choice. */
-.hunk.kept .rl.del {
-  opacity: 0.55;
-  text-decoration: line-through;
-}
-.hunk.discarded .rl.add {
-  opacity: 0.45;
-  text-decoration: line-through;
-}
-.hunk.discarded .rl.del {
-  background: transparent;
-  color: var(--ink);
-}
-
-/* Inline track-changes: the proposal rendered *in the document*, with the
-   agent's changes inline (old red / new green) and a ✓/✗ per change. */
+/* Inline track-changes: the proposal rendered in a read-only Plate editor, with
+   the agent's changes inline (old red / new green) and a ✓/✗ per change. */
 .suggestion-doc {
   flex: 1;
   overflow: auto;
-  max-width: 900px;
-  margin: 0 auto;
-  width: 100%;
-  padding: 16px 28px 40vh 64px; /* left room for the ✓/✗ controls */
+  padding: 8px 20px 40vh;
 }
-.sug-equal > :first-child {
-  margin-top: 0.2em;
+.suggestion-doc .plate-content {
+  max-width: 820px;
+  margin: 0 auto;
+  padding-left: 56px; /* room for the ✓/✗ controls in the margin */
+  position: relative;
 }
 .sug-change {
   position: relative;
-  margin: 1px 0;
   border-radius: 4px;
 }
 .sug-controls {
   position: absolute;
   left: -52px;
-  top: 1px;
   display: inline-flex;
   gap: 2px;
+  user-select: none;
 }
 .sug-controls button {
   padding: 0 6px;
@@ -498,13 +378,11 @@ code {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.sug-text {
-  white-space: pre-wrap;
-}
 .w-del,
 .w-add {
   border-radius: 3px;
   padding: 0 1px;
+  text-decoration: none;
 }
 .w-del {
   text-decoration: line-through;

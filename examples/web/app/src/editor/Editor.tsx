@@ -4,20 +4,42 @@
 // - Saves by serializing back to Markdown and doing an **attributed** write
 //   (write_as) — so afs records blame + an audit op crediting the signed-in
 //   principal. A client can't forge that: the token is resolved server-side.
-// - "Suggest" queues the same content as a proposal instead (the working tree is
-//   untouched until a reviewer accepts it).
-// - An authorship gutter shows who wrote each block, from afs's per-line blame.
+// - "Suggest" queues the same content as a proposal instead.
+// - Inline attribution is native: the AttributionPlugin *decorates* authored
+//   text with its author's color through Plate's own leaf pipeline (no DOM
+//   overlays). The caret's line author is shown natively via useEditorSelection.
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { Plate, PlateContent, usePlateEditor } from "platejs/react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Plate, PlateContent, useEditorSelection, usePlateEditor } from "platejs/react";
 import { deserializeMd, serializeMd } from "@platejs/markdown";
 import { editorPlugins } from "./plugins";
-import { AttributionGutter } from "./AttributionGutter";
-import { InlineBlameAnnotation } from "./InlineBlameAnnotation";
+import { AttributionPlugin } from "./attributionPlugin";
 import { blockAuthorship, blockLineSpans, type BlockAuthorship } from "../lib/blame";
+import { actorColor, kindGlyph } from "../lib/colors";
 import { useSession } from "../session";
 import { AfsError } from "../lib/afsClient";
 import type { BlameRange } from "../lib/types";
+
+// Native current-line attribution: reads the caret's block from the editor
+// selection (Plate context) and names its author — no DOM measurement.
+function ActiveAuthor({ authorship }: { authorship: BlockAuthorship[] }) {
+  const selection = useEditorSelection();
+  const idx = selection?.anchor?.path?.[0];
+  const info = idx != null ? authorship[idx] : undefined;
+  if (!info?.primary) return null;
+  const c = actorColor(info.primary.id, info.primary.kind);
+  const lines =
+    info.lineStart === info.lineEnd ? `line ${info.lineStart}` : `lines ${info.lineStart}–${info.lineEnd}`;
+  return (
+    <div className="active-author">
+      <span style={{ color: c.fg }}>
+        {kindGlyph(info.primary.kind)} {info.primary.display_name}
+        {info.mixed ? " (+ others)" : ""}
+      </span>
+      <span className="muted"> · {lines}</span>
+    </div>
+  );
+}
 
 export function EditorTab({
   path,
@@ -33,25 +55,29 @@ export function EditorTab({
   const { client, token } = useSession();
 
   const editor = usePlateEditor({
-    plugins: editorPlugins,
+    plugins: [...editorPlugins, AttributionPlugin],
     value: (ed) => deserializeMd(ed, initialText || ""),
   });
 
-  const containerRef = useRef<HTMLDivElement>(null);
   const [nodes, setNodes] = useState<unknown[]>(() => editor.children as unknown[]);
-  const [revision, setRevision] = useState(0);
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [showGutter, setShowGutter] = useState(true);
+  const [showAttribution, setShowAttribution] = useState(true);
 
   const authorship = useMemo<BlockAuthorship[]>(
     () => blockAuthorship(blockLineSpans(editor, nodes), blame),
     [editor, nodes, blame],
   );
 
+  // Push per-block authorship into the plugin and refresh the decorations.
+  useEffect(() => {
+    editor.setOption(AttributionPlugin, "spans", authorship);
+    editor.setOption(AttributionPlugin, "enabled", showAttribution);
+    editor.api.redecorate();
+  }, [editor, authorship, showAttribution]);
+
   const onChange = useCallback(() => {
     setNodes([...(editor.children as unknown[])]);
-    setRevision((r) => r + 1);
   }, [editor]);
 
   const save = useCallback(async () => {
@@ -96,20 +122,17 @@ export function EditorTab({
           Suggest…
         </button>
         <label className="toggle">
-          <input type="checkbox" checked={showGutter} onChange={(e) => setShowGutter(e.target.checked)} />
-          attribution gutter
+          <input type="checkbox" checked={showAttribution} onChange={(e) => setShowAttribution(e.target.checked)} />
+          inline attribution
         </label>
         <span className="spacer" />
         {!token && <span className="hint">sign in to edit</span>}
         {status && <span className={`status ${status.kind}`}>{status.text}</span>}
       </div>
-      <div className={`editor-surface ${showGutter ? "with-gutter" : ""}`} ref={containerRef}>
-        {showGutter && (
-          <AttributionGutter containerRef={containerRef} authorship={authorship} revision={revision} />
-        )}
+      <div className="editor-surface">
         <Plate editor={editor} onChange={onChange}>
+          {showAttribution && <ActiveAuthor authorship={authorship} />}
           <PlateContent className="plate-content" placeholder="Write Markdown…" spellCheck />
-          {showGutter && <InlineBlameAnnotation containerRef={containerRef} authorship={authorship} />}
         </Plate>
       </div>
     </div>

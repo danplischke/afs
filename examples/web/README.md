@@ -10,8 +10,8 @@ end to end:
 
 | | |
 |---|---|
-| **Attribution** | afs records per-line **blame** on every attributed write. The editor shows it three ways: an **authorship gutter** beside each block, a GitLens-style **inline annotation** on the caret's line (who wrote it, in their color), and an exact **Blame tab** (every source line with its author, like `git blame`). |
-| **Inline suggestions** | When an agent proposes an edit, review it **inline in the document** — VSCode agent-edit style: unchanged text reads normally, the change appears in place (old text struck through in red, new text in green, **word-level**), with a **✓ Keep / ✗ Discard** on each change plus **Keep all / Discard**. Attribution is preserved (see below): keeping credits the *agent*, never the reviewer. |
+| **Attribution** | afs records per-line **blame** on every attributed write. The editor shows it three ways, all **native Plate**: authored text gets an author-colored underline (a Plate **decoration**), the caret's line names its author (from `useEditorSelection`), and an exact **Blame tab** lists every source line with its author (like `git blame`). |
+| **Inline suggestions** | When an agent proposes an edit, review it **in the editor** — VSCode agent-edit style. The proposal is a read-only **Plate** document: unchanged text reads normally, and each change appears in place with word-level **`<ins>` / `<del>`** marks (new green, old struck red) and a **✓ Keep / ✗ Discard** control, plus **Keep all / Discard**. Attribution is preserved (see below): keeping credits the *agent*, never the reviewer. |
 | **Lineage** | The **History tab** is afs's commit DAG — pick a commit to see the unified diff it introduced. The **Suggestions tab** is the full propose-and-review queue across documents. |
 | **Live** | Presence (who's here now) and an SSE **activity feed** of every attributed change, straight off afs's change feed. |
 | **Trust** | Identity is resolved **server-side**. The browser sends a bearer token; the server maps it to an afs actor and attributes the write. The request body never names an actor, so **attribution can't be forged**. |
@@ -63,7 +63,7 @@ npm run dev        # http://localhost:5173  (proxies /fs and /api to :8000)
 
 Open http://localhost:5173, **sign in** as Ada, Grace, or the `claude` agent
 (the picker is seeded from the server's demo tokens), and start writing. Save is
-an attributed write; the gutter and Blame tab update to credit you.
+an attributed write; the inline attribution and Blame tab update to credit you.
 
 > The demo tokens (`tok-ada`, …) are **hardcoded for the demo only**. In a real
 > app you'd resolve the bearer token to an actor with your own auth (JWT /
@@ -71,11 +71,13 @@ an attributed write; the gutter and Blame tab update to credit you.
 
 ### Try the whole loop
 
-1. Sign in as **Ada**, write a few paragraphs, **Save**. The gutter credits Ada.
+1. Sign in as **Ada**, write a few paragraphs, **Save**. Her text gets her
+   author color inline.
 2. Sign in as **claude** (agent), edit, and **Suggest…** instead of Save.
-3. Sign in as **Grace**, open the **Suggestions** tab, review the diff, **Accept**.
-   The Blame tab now mixes Ada and claude per line — the agent's lines are
-   credited to the agent, not to the reviewer.
+3. Sign in as **Grace**; a banner offers to **Review inline**. Keep/discard the
+   agent's changes in the editor, then **Apply**. The Blame tab mixes Ada and
+   claude per line — the agent's kept lines are credited to the agent, not the
+   reviewer.
 4. **Commit snapshot**, then open **History** to see the diff.
 
 ## How attribution maps onto a rich-text editor
@@ -89,10 +91,16 @@ PlateJS edits **blocks**. The example bridges the two honestly:
   is whatever round-trips through Markdown.)
 - **Blame tab** — renders the exact source lines with their authors. This is 1:1
   with what afs stored, so it's the ground truth (`src/editor/BlameView.tsx`).
-- **Editor gutter** — maps blame onto blocks: each top-level block's source-line
-  span is computed by serializing that block alone, then resolved to its
-  dominant author (`src/lib/blame.ts`, `src/editor/AttributionGutter.tsx`). It's
-  a best-effort projection of the exact line blame onto rendered blocks.
+- **Inline attribution** — a Plate **decoration** underlines authored text in the
+  author's color, rendered through Plate's own leaf pipeline (no DOM overlays,
+  `src/editor/attributionPlugin.tsx`). Each top-level block's source-line span is
+  computed by serializing that block alone, then resolved to its dominant author
+  (`src/lib/blame.ts`) — a best-effort projection of the exact line blame onto
+  rendered blocks.
+
+Both the attribution and the suggestion review are built entirely through Plate
+APIs (decorations, mark/element plugins, `usePluginOption`, transforms) — no DOM
+measurement, no separate diff view, no hand-rolled Markdown rendering.
 
 Unattributed content (a plain `write`, not `write_as`) has **no** blame — afs
 returns an empty list, and the UI says so rather than crediting anyone.
@@ -123,10 +131,10 @@ CAS-safe path.) See `server/app.py` (`/api/suggestion/{id}/apply`) and
 
 ```
 server/
-  app.py            FastAPI: build_router(/fs) + bearer auth → actor,
-                    plus /api/{config,me,actors,doc,feed}
+  app.py            FastAPI: build_router(/fs) + bearer auth → actor, plus
+                    /api/{config,me,actors,doc,feed} + the inline-review endpoints
   test_app.py       end-to-end tests (real workspace): attribution, forge-
-                    prevention, the suggestion flow, commit/log
+                    prevention, the suggestion flow (incl. partial keep), commit/log
   requirements.txt
 app/
   src/
@@ -135,8 +143,9 @@ app/
     session.tsx     token → actor, the actor directory, per-actor color
     doc/            useDocument — load text + blame, stale-while-revalidate
     editor/         EditPane (editor + inline review), Editor (Plate),
-                    AttributionGutter, InlineBlameAnnotation, BlameView, plugins
-    review/         ReviewOverlay — inline red/green diff, per-hunk keep/discard
+                    attributionPlugin (native decoration), BlameView, plugins
+    review/         ReviewOverlay (read-only Plate review), suggestionPlugins
+                    (ins/del marks + change element), buildSuggestionValue
     panels/         HistoryPanel, SuggestionsPanel, ActivityFeed, DiffText
     App.tsx, main.tsx, styles.css
 ```

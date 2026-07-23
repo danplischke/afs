@@ -46,6 +46,7 @@ export function EditPane({
   if (reviewId != null) {
     return (
       <ReviewOverlay
+        key={reviewId}
         id={reviewId}
         onCancel={() => setReviewId(null)}
         onDone={(msg) => {

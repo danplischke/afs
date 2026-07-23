@@ -345,3 +345,127 @@ async fn postgres_concurrent_same_path_create_leaves_no_orphans() {
     drop(client);
     let _ = handle.await;
 }
+
+/// H6: change-feed appends serialize on the feed advisory lock so `seq` commits
+/// in assignment order — the property that stops a tailer from advancing past a
+/// still-uncommitted lower seq and silently dropping it. Deterministic: hold the
+/// feed lock in a side transaction and prove `append_event` blocks until it's
+/// released (before the fix it took no lock and returned immediately).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_append_event_serializes_on_feed_lock() {
+    let Some(dsn) = dsn() else {
+        eprintln!("skipping postgres_append_event_serializes_on_feed_lock: AFS_PG_TEST_URL unset");
+        return;
+    };
+    let _guard = pg_lock().lock().await;
+    reset(&dsn).await;
+    let meta = Arc::new(PostgresMetadataStore::connect(&dsn).await.unwrap());
+    meta.init().await.unwrap();
+
+    // Hold the feed advisory lock in a side transaction on a separate connection.
+    let (blocker, conn) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let blocker_conn = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    blocker.batch_execute("BEGIN").await.unwrap();
+    blocker
+        .execute(
+            "SELECT pg_advisory_xact_lock($1)",
+            &[&afs_core::postgres::FEED_LOCK_KEY],
+        )
+        .await
+        .unwrap();
+
+    // An append must now block on the feed lock, not complete.
+    let m = meta.clone();
+    let append = tokio::spawn(async move {
+        m.append_event(
+            EventInit {
+                actor_id: None,
+                session_id: None,
+                kind: "write".into(),
+                path: "/x".into(),
+                detail: None,
+                branch: None,
+            },
+            1,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !append.is_finished(),
+        "append_event must block while the feed lock is held (H6 serialization)"
+    );
+
+    // Release the lock (commit the side txn); the append now completes.
+    blocker.batch_execute("COMMIT").await.unwrap();
+    let seq = timeout(Duration::from_secs(5), append)
+        .await
+        .expect("append did not finish after the feed lock was released")
+        .unwrap()
+        .unwrap();
+    assert!(seq >= 1);
+
+    drop(blocker);
+    let _ = blocker_conn.await;
+}
+
+/// Under concurrent appends the feed stays gapless (every seq assigned exactly
+/// once, contiguous) and a from-zero subscriber sees every event exactly once in
+/// increasing seq order — no drops, no duplicates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_concurrent_appends_deliver_every_event_once() {
+    let Some(dsn) = dsn() else {
+        eprintln!("skipping postgres_concurrent_appends_deliver_every_event_once: AFS_PG_TEST_URL unset");
+        return;
+    };
+    let _guard = pg_lock().lock().await;
+    reset(&dsn).await;
+    let meta = Arc::new(PostgresMetadataStore::connect(&dsn).await.unwrap());
+    meta.init().await.unwrap();
+
+    const K: usize = 50;
+    let mut handles = Vec::new();
+    for i in 0..K {
+        let m = meta.clone();
+        handles.push(tokio::spawn(async move {
+            m.append_event(
+                EventInit {
+                    actor_id: None,
+                    session_id: None,
+                    kind: "write".into(),
+                    path: format!("/f{i}"),
+                    detail: None,
+                    branch: None,
+                },
+                i as i64,
+            )
+            .await
+        }));
+    }
+    let mut seqs = Vec::new();
+    for h in handles {
+        seqs.push(h.await.unwrap().unwrap());
+    }
+    seqs.sort_unstable();
+    assert_eq!(seqs.len(), K);
+    for w in seqs.windows(2) {
+        assert_eq!(w[1], w[0] + 1, "seqs must be contiguous — no gaps or duplicates");
+    }
+
+    // Every appended event is delivered exactly once, in increasing seq order.
+    let mut sub = meta.subscribe(0, None).await.unwrap();
+    let mut got: Vec<i64> = Vec::new();
+    while got.len() < K {
+        for e in recv_batch(&mut sub).await {
+            got.push(e.seq);
+        }
+    }
+    assert_eq!(got.len(), K, "every event delivered exactly once");
+    for w in got.windows(2) {
+        assert!(w[1] > w[0], "delivered in strictly increasing seq order");
+    }
+}

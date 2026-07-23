@@ -16,11 +16,11 @@
 //! JSON-serializable in an API response. Mounting (FUSE) and NFS serving are
 //! exposed so orchestration can live in Python too.
 
-use afs_core::{LocalCasStore, PostgresMetadataStore};
+use afs_core::LocalCasStore;
 use afs_sdk::{
-    Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, Inode, Presence,
-    S3Config as CoreS3Config, Suggestion, SuggestionStatus, Workspace as CoreWorkspace,
-    WriteCtx as CoreWriteCtx,
+    Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, EventSubscription,
+    Inode, Presence, S3Config as CoreS3Config, Suggestion, SuggestionStatus,
+    Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -221,6 +221,37 @@ impl WriteCtx {
     }
 }
 
+// --- change-feed push subscription ------------------------------------------
+
+/// A live push subscription to the change feed (Postgres `LISTEN/NOTIFY`).
+/// `await sub.recv()` blocks until the next batch of events arrives — a real
+/// push, not a poll. Returned by `Workspace.subscribe`.
+#[pyclass]
+struct Subscription {
+    inner: Arc<tokio::sync::Mutex<EventSubscription>>,
+}
+
+#[pymethods]
+impl Subscription {
+    /// Block until the next batch of events, returned oldest-first as dicts.
+    /// Returns `[]` once the feed's connection has closed.
+    fn recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let sub = self.inner.clone();
+        future_into_py(py, async move {
+            let events = {
+                let mut guard = sub.lock().await;
+                guard.recv().await.map_err(to_pyerr)?
+            };
+            Python::attach(|py| {
+                events
+                    .iter()
+                    .map(|e| event_dict(py, e))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })
+    }
+}
+
 // --- S3 config --------------------------------------------------------------
 
 /// Connection settings for an S3-compatible object store (AWS S3, Cloudflare R2,
@@ -361,9 +392,12 @@ impl Workspace {
         cas_dir: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         future_into_py(py, async move {
-            let meta = Arc::new(PostgresMetadataStore::connect(&dsn).await.map_err(to_pyerr)?);
             let content = Arc::new(LocalCasStore::open(&cas_dir).await.map_err(to_pyerr)?);
-            let ws = CoreWorkspace::open(meta, content).await.map_err(to_pyerr)?;
+            // Via the SDK constructor so the workspace retains its Postgres handle
+            // (needed for the `subscribe` LISTEN/NOTIFY push feed).
+            let ws = CoreWorkspace::open_pg(&dsn, content)
+                .await
+                .map_err(to_pyerr)?;
             Python::attach(|py| Py::new(py, Workspace { inner: ws }))
         })
     }
@@ -784,6 +818,34 @@ impl Workspace {
         })
     }
 
+    /// A **push** subscription to the change feed (Postgres `LISTEN/NOTIFY`):
+    /// `await`ing the returned object's `recv()` blocks until the next batch of
+    /// events, instead of polling `watch`. Optionally branch-scoped. Raises on
+    /// non-Postgres backends (use `watch` there).
+    #[pyo3(signature = (after_seq=0, branch=None))]
+    fn subscribe<'py>(
+        &self,
+        py: Python<'py>,
+        after_seq: i64,
+        branch: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let sub = ws
+                .subscribe(after_seq, branch.as_deref())
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| {
+                Py::new(
+                    py,
+                    Subscription {
+                        inner: Arc::new(tokio::sync::Mutex::new(sub)),
+                    },
+                )
+            })
+        })
+    }
+
     /// Sessions active within the last `window_secs` seconds.
     #[pyo3(signature = (window_secs=60))]
     fn presence<'py>(&self, py: Python<'py>, window_secs: i64) -> PyResult<Bound<'py, PyAny>> {
@@ -975,6 +1037,7 @@ fn _afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Workspace>()?;
     m.add_class::<WriteCtx>()?;
     m.add_class::<S3Config>()?;
+    m.add_class::<Subscription>()?;
     m.add_class::<Mount>()?;
     m.add_function(wrap_pyfunction!(fuse_mountable, m)?)?;
     m.add("AfsError", m.py().get_type::<AfsError>())?;

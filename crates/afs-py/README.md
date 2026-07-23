@@ -74,6 +74,22 @@ attribution. Reads are open by default; pass `reader=<dependency>` to gate them,
 or `dependencies=[...]` (forwarded to `APIRouter`) to gate everything. Needs the
 `fastapi` extra (`pip install "afs[fastapi]"`). See `examples/fastapi_router.py`.
 
+## Live change feed (push)
+
+On Postgres, `subscribe` gives a real push feed (LISTEN/NOTIFY) — `await recv()`
+blocks until the next batch instead of polling `watch`. Ideal behind a FastAPI
+SSE/WebSocket endpoint:
+
+```python
+sub = await ws.subscribe(after_seq=0, branch="main")   # PG only; raises on SQLite
+while True:
+    events = await sub.recv()      # woken by NOTIFY; [] once the connection closes
+    if not events:
+        break
+    for e in events:
+        ...                        # push to the client
+```
+
 ## Mount orchestration
 
 ```python
@@ -97,6 +113,7 @@ the suggestion review queue, the live feed, and presence).
 `status` · `diff` · `diff_file` · `create_branch` · `checkout` · `branches` ·
 `current_branch` · `create_human` · `create_agent` · `actor_by_subject` · `find_or_create_human` ·
 `find_or_create_agent` · `create_session` · `blame` ·
-`watch` · `presence` · `touch` · `suggest` · `suggest_delete` · `list_suggestions` ·
+`watch` · `subscribe` · `presence` · `touch` · `suggest` · `suggest_delete` ·
+`list_suggestions` ·
 `get_suggestion` · `suggestion_diff` · `accept_suggestion` · `reject_suggestion` ·
 `mount` · `serve_nfs`. Plus `WriteCtx`, `S3Config`, `Mount`, `fuse_mountable()`.

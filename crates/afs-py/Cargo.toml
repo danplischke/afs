@@ -20,7 +20,7 @@ afs-sdk = { version = "0.1.0", path = "../afs-sdk" }
 afs-fuse = { version = "0.0.0", path = "../afs-fuse" }
 afs-nfs = { version = "0.0.0", path = "../afs-nfs" }
 fuser = "0.17"
-tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync"] }
 pyo3 = { version = "0.29.0", features = ["abi3-py39"] }
 pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
 

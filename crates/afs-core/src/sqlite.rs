@@ -401,6 +401,19 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    async fn bump_counter(&self, key: &str) -> Result<i64> {
+        let conn = self.lock();
+        // One atomic upsert: create at 1, else increment the stored integer.
+        let v: i64 = conn.query_row(
+            "INSERT INTO config(key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+             RETURNING CAST(value AS INTEGER)",
+            params![key],
+            |r| r.get(0),
+        )?;
+        Ok(v)
+    }
+
     async fn truncate_tree(&self) -> Result<()> {
         let conn = self.lock();
         // Blame is keyed by content hash (blob_blame), not by inode, so it is

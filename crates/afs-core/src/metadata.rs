@@ -95,6 +95,10 @@ pub trait MetadataStore: Send + Sync {
 
     async fn get_config(&self, key: &str) -> Result<Option<String>>;
     async fn set_config(&self, key: &str, value: &str) -> Result<()>;
+    /// Atomically increment the integer config counter at `key` (creating it at
+    /// `1`) and return the new value. A single statement, so concurrent callers
+    /// each get a distinct, strictly increasing value — unlike a read-then-write.
+    async fn bump_counter(&self, key: &str) -> Result<i64>;
 
     // --- working tree ----------------------------------------------------
 
@@ -310,6 +314,9 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         (**self).set_config(key, value).await
+    }
+    async fn bump_counter(&self, key: &str) -> Result<i64> {
+        (**self).bump_counter(key).await
     }
     async fn truncate_tree(&self) -> Result<()> {
         (**self).truncate_tree().await

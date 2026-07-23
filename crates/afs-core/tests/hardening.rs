@@ -304,3 +304,27 @@ async fn write_as_expecting_is_a_content_cas() {
     fs.write_as_expecting(ctx, "/f.txt", b"proposed", base).await.unwrap();
     assert_eq!(&fs.read("/f.txt").await.unwrap()[..], b"proposed");
 }
+
+// SEC (security audit #21): mirror_refs bumps its generation via an atomic
+// counter, not a read-then-write — so concurrent ref updates get distinct,
+// strictly increasing generations and a recovery scan can pick the newest
+// snapshot unambiguously.
+#[tokio::test]
+async fn bump_counter_is_atomic_and_distinct() {
+    let m = Arc::new(SqliteMetadataStore::open_in_memory().unwrap());
+    m.init().await.unwrap();
+
+    // sequential increments start at 1 and step by one
+    assert_eq!(m.bump_counter("c").await.unwrap(), 1);
+    assert_eq!(m.bump_counter("c").await.unwrap(), 2);
+
+    // concurrent bumps never collide: three racers yield {3, 4, 5}
+    let (a, b, c) = tokio::join!(
+        { let m = m.clone(); async move { m.bump_counter("c").await.unwrap() } },
+        { let m = m.clone(); async move { m.bump_counter("c").await.unwrap() } },
+        { let m = m.clone(); async move { m.bump_counter("c").await.unwrap() } },
+    );
+    let mut got = [a, b, c];
+    got.sort();
+    assert_eq!(got, [3, 4, 5]);
+}

@@ -268,6 +268,12 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         self.meta.actor_by_subject(subject).await
     }
 
+    /// Every registered actor, oldest first — for resolving the bare `actor_id`
+    /// carried by events, suggestions, and presence to a name + kind.
+    pub async fn list_actors(&self) -> Result<Vec<Actor>> {
+        self.meta.list_actors().await
+    }
+
     /// Idempotently map an external identity to an actor: return the actor already
     /// registered for `init.auth_subject`, or create one and return its id. This
     /// is how an application binds its own user id to an afs actor without keeping

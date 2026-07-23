@@ -575,6 +575,44 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    async fn list_actors(&self) -> Result<Vec<Actor>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, display_name, auth_subject, agent_model, agent_vendor, controller_actor_id, created_at
+             FROM actor ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut actors = Vec::new();
+        for row in rows {
+            let (id, kind, display_name, auth_subject, agent_model, agent_vendor, controller, created_at) =
+                row?;
+            let kind = ActorKind::parse(&kind)
+                .ok_or_else(|| AfsError::Metadata(format!("bad actor kind {kind:?}")))?;
+            actors.push(Actor {
+                id,
+                kind,
+                display_name,
+                auth_subject,
+                agent_model,
+                agent_vendor,
+                controller_actor_id: controller,
+                created_at,
+            });
+        }
+        Ok(actors)
+    }
+
     async fn create_session(
         &self,
         actor_id: i64,

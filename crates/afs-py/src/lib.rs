@@ -807,6 +807,34 @@ impl Workspace {
         })
     }
 
+    /// Look up an actor by its numeric id, or `None`. Resolves the bare
+    /// `actor_id` carried by events/suggestions/presence to a full actor dict.
+    fn actor<'py>(&self, py: Python<'py>, id: i64) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let found = ws.get_actor(id).await.map_err(to_pyerr)?;
+            Python::attach(|py| match found {
+                Some(a) => Ok(Some(actor_dict(py, &a)?)),
+                None => Ok(None),
+            })
+        })
+    }
+
+    /// Every registered actor (oldest first). Handy to build a client-side
+    /// directory that resolves the `actor_id` in events/suggestions to a name.
+    fn list_actors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let actors = ws.list_actors().await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                actors
+                    .iter()
+                    .map(|a| actor_dict(py, a))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })
+    }
+
     /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
     /// returns the existing actor for that subject, or creates one. Race-safe.
     fn find_or_create_human<'py>(
@@ -1040,6 +1068,23 @@ impl Workspace {
         future_into_py(py, async move {
             let patch = ws.suggestion_diff(id).await.map_err(to_pyerr)?;
             Ok(patch)
+        })
+    }
+
+    /// A suggestion's base and proposed **content**, read from the store — so a
+    /// reviewer UI can render an inline diff without stashing the proposed bytes
+    /// itself. Returns ``{"base": str, "proposed": str | None}`` (``proposed`` is
+    /// ``None`` when the suggestion proposes a deletion).
+    fn suggestion_content<'py>(&self, py: Python<'py>, id: i64) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let c = ws.suggestion_content(id).await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                let d = PyDict::new(py);
+                d.set_item("base", c.base)?;
+                d.set_item("proposed", c.proposed)?;
+                Ok(d.into_any().unbind())
+            })
         })
     }
 

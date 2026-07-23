@@ -86,6 +86,16 @@ pub struct Suggestion {
     pub resolved_by: Option<i64>,
 }
 
+/// A suggestion's **content** (not just a diff): the text at the proposal's base
+/// and the proposed text. Lets a caller render an inline review straight from the
+/// store, instead of stashing the proposed bytes app-side. `proposed` is `None`
+/// when the suggestion proposes a deletion.
+#[derive(Clone, Debug)]
+pub struct SuggestionContent {
+    pub base: String,
+    pub proposed: Option<String>,
+}
+
 impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
     /// Propose an edit to `path` without applying it. The bytes are stored in
     /// the CAS now; the working tree is untouched until the suggestion is
@@ -210,6 +220,23 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
         let old = self.hex_to_text(s.base_hash.as_deref()).await?;
         let new = self.hex_to_text(s.proposed_hash.as_deref()).await?;
         Ok(diffy::create_patch(&old, &new).to_string())
+    }
+
+    /// A suggestion's base and proposed **content**, read from the store — so a
+    /// reviewer UI can render an inline diff without the app stashing the proposed
+    /// bytes itself. `proposed` is `None` when the suggestion proposes a deletion.
+    pub async fn suggestion_content(&self, id: i64) -> Result<SuggestionContent> {
+        let s = self
+            .meta
+            .get_suggestion(id)
+            .await?
+            .ok_or_else(|| AfsError::NotFound(format!("suggestion #{id}")))?;
+        let base = self.hex_to_text(s.base_hash.as_deref()).await?;
+        let proposed = match s.proposed_hash.as_deref() {
+            Some(h) => Some(self.hex_to_text(Some(h)).await?),
+            None => None,
+        };
+        Ok(SuggestionContent { base, proposed })
     }
 
     async fn hex_to_text(&self, hex: Option<&str>) -> Result<String> {

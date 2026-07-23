@@ -19,18 +19,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "afs-agentfs"
-version = "0.0.0"
-dependencies = [
- "afs-core",
- "afs-sdk",
- "async-recursion",
- "rusqlite",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "afs-api"
 version = "0.0.0"
 dependencies = [
@@ -48,7 +36,6 @@ dependencies = [
 name = "afs-cli"
 version = "0.1.0"
 dependencies = [
- "afs-agentfs",
  "afs-api",
  "afs-fuse",
  "afs-git",

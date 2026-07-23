@@ -537,7 +537,7 @@ ranges with zero manual bookkeeping.
 | **M6 — Attribution** | actor/session registry; `edit_op` capture wired through the write path; `blame` index; blame API + xattr; merge/rebase blame survival | **Per-actor attribution + blame** (goal 4) |
 | **M7 — Access surfaces** | FUSE mount; MCP server (auto-attributed tool calls); HTTP/gRPC control API; NFS for macOS | Agents + humans actually use it as a filesystem |
 | **M8 — Live collaboration** | shared working tree with advisory-lock coordination; `watch`/NOTIFY; opt-in CRDT co-editing; offline solo + reconnect-merge | **Shared human+agent live workspace** (goal 4, live) |
-| **M9 — Hardening** | GC (mark-sweep + grace); encryption/compression; metrics/tracing; benchmarks; migration tool from an agentfs `.db` | Production readiness |
+| **M9 — Hardening** | GC (mark-sweep + grace); encryption/compression; metrics/tracing; benchmarks | Production readiness |
 
 Each milestone is independently demoable; M1+M2+M3 in either order after M0.
 

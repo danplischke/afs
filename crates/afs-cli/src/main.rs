@@ -234,20 +234,6 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:11111")]
         addr: String,
     },
-    /// Import a `tursodatabase/agentfs` SQLite database into this workspace.
-    ImportAgentfs {
-        /// Path to the agentfs `.db` file.
-        db: PathBuf,
-        /// Actor name for the imported tree + audit.
-        #[arg(long, default_value = "agentfs")]
-        agent_name: String,
-        /// Import without attributing files to the agent actor.
-        #[arg(long)]
-        no_attribution: bool,
-        /// Skip replaying agentfs's tool-call audit log.
-        #[arg(long)]
-        no_tool_calls: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -726,23 +712,6 @@ async fn main() -> Result<()> {
                 "serving afs over NFSv3 at {addr}\n  mount with: mount -t nfs -o vers=3,tcp,port=<port>,mountport=<port>,nolock <host>:/ /mnt"
             );
             afs_nfs::serve(ws, &addr).await?;
-        }
-        Cmd::ImportAgentfs {
-            db,
-            agent_name,
-            no_attribution,
-            no_tool_calls,
-        } => {
-            let opts = afs_agentfs::ImportOptions {
-                attribute: !no_attribution,
-                agent_name,
-                import_tool_calls: !no_tool_calls,
-            };
-            let s = afs_agentfs::import_agentfs(&ws, &db, &opts).await?;
-            println!(
-                "imported {} dir(s), {} file(s), {} symlink(s), {} tool call(s) ({} bytes)",
-                s.dirs, s.files, s.symlinks, s.tool_calls, s.bytes
-            );
         }
     }
     Ok(())

@@ -56,6 +56,11 @@ from afs.fastapi import build_router
 # authenticates. In a real app you'd decode a JWT / look up a session / verify
 # an agent token here instead. Each principal carries a stable external id; afs
 # maps that id to an actor the first time we see it and reuses it forever after.
+#
+# !!! DEMO ONLY — these are hardcoded sample tokens. Do NOT ship them, and do not
+# copy this static dict into a real service: replace `_ctx_for_token` with your
+# real auth (JWT/session/verified agent token). Anyone who knows one of these
+# strings can act as that principal.
 
 PRINCIPALS: dict[str, dict] = {
     "tok-dan":      {"kind": "human", "external_id": "user:dan",     "name": "Dan"},

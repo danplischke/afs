@@ -115,6 +115,82 @@ async fn presence_rows_can_be_reaped() {
     assert!(m.active_presence(0).await.unwrap().is_empty());
 }
 
+// SEC (security audit #2/#11): traversal/separator path components are rejected
+// at every metadata boundary, so a poisoned name (`..`) can never be *stored*
+// and later escape during a host materialization — e.g. the sandbox's
+// `export_tree` doing `host_dir.join("..")`, which would climb out of `lower/`
+// and write arbitrary host files.
+#[tokio::test]
+async fn traversal_path_components_are_rejected_everywhere() {
+    let fs = fixture().await;
+
+    // The path API (afs-api / MCP / SDK / CLI all funnel through `split`).
+    for bad in ["/a/../b", "/../etc/passwd", "/./x", "/a/./b"] {
+        assert!(
+            matches!(fs.mkdir_p(bad).await, Err(AfsError::InvalidPath(_))),
+            "mkdir_p should reject {bad:?}"
+        );
+    }
+    assert!(matches!(
+        fs.write("/x/../y", b"z").await,
+        Err(AfsError::InvalidPath(_))
+    ));
+
+    // The inode-oriented FUSE/NFS boundary (raw name components).
+    for bad in ["..", ".", "a/b", "x\0y", ""] {
+        assert!(
+            matches!(fs.vfs_create(INO_ROOT, bad, 0o644).await, Err(AfsError::InvalidPath(_))),
+            "vfs_create should reject {bad:?}"
+        );
+        assert!(
+            matches!(fs.vfs_mkdir(INO_ROOT, bad, 0o755).await, Err(AfsError::InvalidPath(_))),
+            "vfs_mkdir should reject {bad:?}"
+        );
+    }
+
+    // rename cannot introduce a traversal destination.
+    fs.write("/ok", b"hi").await.unwrap();
+    assert!(matches!(
+        fs.vfs_rename(INO_ROOT, "ok", INO_ROOT, "..").await,
+        Err(AfsError::InvalidPath(_))
+    ));
+
+    // a normal nested path still works end to end.
+    fs.mkdir_p("/real/dir").await.unwrap();
+    fs.write("/real/dir/f", b"ok").await.unwrap();
+    assert_eq!(&fs.read("/real/dir/f").await.unwrap()[..], b"ok");
+}
+
+// SEC (security audit #4): the object-graph decoders must bound their
+// pre-allocation, so a tiny crafted object declaring a hostile entry count
+// returns an error instead of aborting the process on a multi-GB
+// `Vec::with_capacity`. Without the fix these lines abort the test binary.
+#[test]
+fn objectgraph_decoders_reject_hostile_counts_without_oom() {
+    use afs_core::{Commit, RefSnapshot, Tree};
+
+    // Tree: magic | count = 0xFFFFFFFF, no entry bytes.
+    let mut t = b"AFST\x01".to_vec();
+    t.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(Tree::decode(&t).is_err());
+
+    // Commit: magic | tree(32) | parent_count = 0xFFFFFFFF.
+    let mut c = b"AFSC\x01".to_vec();
+    c.extend_from_slice(&[0u8; 32]);
+    c.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(Commit::decode(&c).is_err());
+
+    // RefSnapshot: magic | generation(8) | count = 0xFFFFFFFF.
+    let mut r = b"AFSR\x01".to_vec();
+    r.extend_from_slice(&0u64.to_le_bytes());
+    r.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(RefSnapshot::decode(&r).is_err());
+
+    // honest objects still round-trip.
+    let tree = Tree { entries: vec![] };
+    assert_eq!(Tree::decode(&tree.encode()).unwrap(), tree);
+}
+
 // H1: concurrent merges must not both "succeed" — a merge that loses the ref
 // CAS must error, never report a Merged/FastForward commit that isn't the
 // branch head (which would orphan the commit and drop history).

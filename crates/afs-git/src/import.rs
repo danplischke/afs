@@ -182,8 +182,49 @@ fn lfs_pointer_oid(payload: &[u8]) -> Option<String> {
     }
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("oid sha256:") {
-            return Some(rest.trim().to_string());
+            let oid = rest.trim();
+            // Only accept a well-formed 64-char hex sha256. An unvalidated oid is
+            // spliced into `.git/lfs/objects/<oid[..2]>/<oid[2..4]>/<oid>` and
+            // read from disk, so a value like `../../../../etc/passwd` would read
+            // an arbitrary host file into the store (and a short/non-ASCII oid
+            // would panic the `[..2]` slice). Reject anything else.
+            if oid.len() == 64 && oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(oid.to_string());
+            }
+            return None;
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // SEC (security audit #7 / critic C1+C3): a git-LFS pointer's oid is spliced
+    // into a filesystem path and read, so a traversal/malformed oid must not be
+    // accepted (arbitrary host-file read) or slice-panic the process.
+    #[test]
+    fn lfs_pointer_oid_rejects_traversal_and_malformed() {
+        let ptr = |oid: &str| {
+            format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 12\n")
+                .into_bytes()
+        };
+        // valid 64-hex sha256 is accepted
+        let good = "a".repeat(64);
+        assert_eq!(lfs_pointer_oid(&ptr(&good)), Some(good));
+        // traversal, short, and non-hex oids are all rejected
+        for bad in [
+            "../../../../etc/passwd",
+            "x",
+            "..",
+            &"g".repeat(64),        // non-hex
+            &"a".repeat(63),        // wrong length
+            "a/b",
+        ] {
+            assert_eq!(lfs_pointer_oid(&ptr(bad)), None, "oid {bad:?} must be rejected");
+        }
+        // not an LFS pointer at all
+        assert_eq!(lfs_pointer_oid(b"just a normal blob"), None);
+    }
 }

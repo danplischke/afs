@@ -143,6 +143,27 @@ fn git_name_cmp(a: &str, a_dir: bool, b: &str, b_dir: bool) -> Ordering {
     }
 }
 
+/// Inflate ceiling for a single loose object: bounds a zlib decompression bomb
+/// (a few KB expanding to many GB) so import / the remote helper can't be OOM'd.
+const MAX_GIT_OBJECT: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+/// Validate a hex object id before it is used to build a filesystem path or
+/// sliced positionally. Git ids are hex of a fixed width (40 for SHA-1, 64 for
+/// SHA-256); anything else — a `..`, an embedded separator, a short/oversized or
+/// non-hex string — is rejected. This closes a path traversal (an unvalidated id
+/// like `../../etc/passwd` reading an arbitrary host file into the store on
+/// import) and the `&oid[..2]` slice panic on a malformed id.
+pub fn validate_oid(oid_hex: &str) -> Result<()> {
+    let ok = (oid_hex.len() == 40 || oid_hex.len() == 64)
+        && oid_hex.bytes().all(|b| b.is_ascii_hexdigit());
+    if !ok {
+        return Err(AfsError::Content(format!(
+            "invalid git object id: {oid_hex:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Path to a loose object within a git dir.
 pub fn loose_path(git_dir: &Path, oid_hex: &str) -> PathBuf {
     git_dir
@@ -169,13 +190,21 @@ pub fn write_loose(git_dir: &Path, obj: &GitObject) -> Result<()> {
 
 /// Read and inflate a loose object, returning `(kind, payload)`.
 pub fn read_loose(git_dir: &Path, oid_hex: &str) -> Result<(String, Vec<u8>)> {
+    validate_oid(oid_hex)?;
     let path = loose_path(git_dir, oid_hex);
     let compressed = std::fs::read(&path)
         .map_err(|_| AfsError::NotFound(format!("git object {oid_hex}")))?;
     let mut framed = Vec::new();
+    // Bounded inflate: cap the output so a decompression bomb can't OOM us.
     flate2::read::ZlibDecoder::new(&compressed[..])
+        .take(MAX_GIT_OBJECT + 1)
         .read_to_end(&mut framed)
         .map_err(|e| AfsError::Content(format!("inflate {oid_hex}: {e}")))?;
+    if framed.len() as u64 > MAX_GIT_OBJECT {
+        return Err(AfsError::Content(format!(
+            "git object {oid_hex} exceeds {MAX_GIT_OBJECT} bytes (possible zip bomb)"
+        )));
+    }
     parse_framed(&framed)
 }
 
@@ -280,5 +309,30 @@ pub fn git_ident(author: &str) -> String {
         author.to_string()
     } else {
         format!("{author} <{author}@afs.local>")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // SEC (security audit critic C3): an object id becomes `objects/<id[..2]>/<id[2..]>`
+    // and is read from disk, so a malformed id must be rejected before it can
+    // traverse the filesystem or panic the positional slice.
+    #[test]
+    fn validate_oid_accepts_only_fixed_width_hex() {
+        assert!(validate_oid(&"a".repeat(40)).is_ok()); // SHA-1
+        assert!(validate_oid(&"0".repeat(64)).is_ok()); // SHA-256
+        for bad in [
+            "..",
+            "../../etc/passwd",
+            "x",                 // too short, would panic `[..2]`
+            "",
+            &"a".repeat(41),     // wrong width
+            &"z".repeat(40),     // non-hex
+            "abc/def",
+        ] {
+            assert!(validate_oid(bad).is_err(), "oid {bad:?} must be rejected");
+        }
     }
 }

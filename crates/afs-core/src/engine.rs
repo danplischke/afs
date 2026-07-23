@@ -16,6 +16,26 @@ const DIR_MODE: u32 = 0o040755;
 const FILE_MODE: u32 = 0o100644;
 const SYMLINK_MODE: u32 = 0o120777;
 
+/// Reject a single path component that could escape the workspace tree or
+/// corrupt the dentry graph: the traversal names `.`/`..`, an empty name, or a
+/// name embedding a path separator or NUL. Enforced at every metadata boundary
+/// (path resolution and the inode-oriented FUSE/NFS ops) so a poisoned name can
+/// never be *stored* — which is what stops it from later escaping during a host
+/// materialization such as the sandbox's `export_tree` (`host_dir.join("..")`).
+pub(crate) fn validate_component(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\0')
+    {
+        return Err(AfsError::InvalidPath(format!(
+            "invalid path component: {name:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// A filesystem over a metadata store and a content store.
 #[derive(Clone)]
 pub struct Fs<M: MetadataStore, C: ContentStore> {
@@ -38,14 +58,19 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     // --- path helpers -----------------------------------------------------
 
-    /// Split an absolute path into its non-empty segments.
+    /// Split an absolute path into its non-empty segments, rejecting any
+    /// traversal component (`.`/`..`) so no path can escape the workspace root.
     fn split(path: &str) -> Result<Vec<&str>> {
         if !path.starts_with('/') {
             return Err(AfsError::InvalidPath(format!(
                 "path must be absolute: {path}"
             )));
         }
-        Ok(path.split('/').filter(|s| !s.is_empty()).collect())
+        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        for seg in &segs {
+            validate_component(seg)?;
+        }
+        Ok(segs)
     }
 
     /// Resolve an absolute path to its inode.
@@ -393,9 +418,28 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// reconstruct a specific version's bytes.
     pub(crate) async fn content_bytes(&self, mhash: &Hash) -> Result<Bytes> {
         let manifest = self.load_manifest(mhash).await?;
-        let mut buf = BytesMut::with_capacity(manifest.size as usize);
+        // Don't trust the manifest's declared sizes for the up-front allocation:
+        // even though `Manifest::decode` checks `size == Σ chunk.len`, a crafted
+        // manifest can still declare many oversized chunk lengths and drive a
+        // huge `with_capacity` that aborts the process. Reserve a bounded amount
+        // and let the buffer grow as real chunk bytes arrive, enforcing the true
+        // file-size ceiling on the accumulated bytes.
+        const INITIAL_HINT: usize = 8 * 1024 * 1024;
+        let hint = manifest
+            .chunks
+            .iter()
+            .fold(0usize, |a, c| a.saturating_add(c.len as usize))
+            .min(INITIAL_HINT);
+        let mut buf = BytesMut::with_capacity(hint);
         for c in &manifest.chunks {
-            buf.extend_from_slice(&self.content.get(&c.hash).await?);
+            let chunk = self.content.get(&c.hash).await?;
+            if buf.len().saturating_add(chunk.len()) > crate::vfs::MAX_FILE_SIZE as usize {
+                return Err(AfsError::TooLarge(format!(
+                    "file body exceeds {} bytes",
+                    crate::vfs::MAX_FILE_SIZE
+                )));
+            }
+            buf.extend_from_slice(&chunk);
         }
         Ok(buf.freeze())
     }

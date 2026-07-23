@@ -174,6 +174,21 @@ enum Cmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Run an agent in a live native overlay mount over the workspace: it works
+    /// in a fast unprivileged kernel overlay while its changes stream into afs
+    /// (attributed) as it goes — not just on exit.
+    /// Usage: `afs overlay --actor 1 -- <agent-cmd> [args...]`
+    Overlay {
+        /// Attribute the agent's changes to this actor id.
+        #[arg(long)]
+        actor: Option<i64>,
+        /// How often (ms) to sync the agent's changes into afs while it runs.
+        #[arg(long, default_value_t = 500)]
+        sync_ms: u64,
+        /// The agent command to run (after `--`).
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
     /// Mount the workspace as a POSIX filesystem via FUSE (blocks until
     /// unmounted; needs root + /dev/fuse).
     Mount { mountpoint: PathBuf },
@@ -586,6 +601,32 @@ async fn main() -> Result<()> {
             } else {
                 println!("command exited {}; delta discarded", outcome.exit_code);
             }
+            std::process::exit(outcome.exit_code);
+        }
+        Cmd::Overlay {
+            actor,
+            sync_ms,
+            cmd,
+        } => {
+            if !afs_sandbox::overlay_supported() {
+                anyhow::bail!(
+                    "unprivileged overlayfs is unavailable here (needs user-namespace overlay support)"
+                );
+            }
+            let tmp = cli
+                .workspace
+                .join(format!("overlay-{}", std::process::id()));
+            let opts = afs_sandbox::LiveOpts {
+                actor,
+                work_root: tmp.clone(),
+                sync_interval: std::time::Duration::from_millis(sync_ms),
+            };
+            let outcome = afs_sandbox::run_live(&ws, opts, &cmd).await?;
+            let _ = std::fs::remove_dir_all(&tmp);
+            println!(
+                "agent exited {}; streamed {} change(s) into afs",
+                outcome.exit_code, outcome.files_changed
+            );
             std::process::exit(outcome.exit_code);
         }
         Cmd::Mount { mountpoint } => {

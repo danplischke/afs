@@ -122,8 +122,17 @@ nfs = asyncio.create_task(ws.serve_nfs("127.0.0.1:11111"))  # runs until cancell
 nfs.cancel()
 ```
 
-See `examples/fastapi_app.py` for a full FastAPI app (file CRUD, blame, diff,
-the suggestion review queue, the live feed, and presence).
+## Examples
+
+- **`examples/collab_app.py`** — the one to start from. A complete little
+  service (bearer-token auth mapped to actors, the full workspace API, a live
+  SSE feed) that also **runs itself**: `python examples/collab_app.py` plays
+  the whole story end to end — a human writes, an agent *suggests*, a reviewer
+  accepts, and blame ends up crediting both — with no server or curl needed.
+- `examples/fastapi_router.py` — the minimal `build_router` one-liner with your
+  own header auth.
+- `examples/fastapi_app.py` — the same surface written out as hand-rolled
+  endpoints, if you'd rather own each route.
 
 ## API surface
 

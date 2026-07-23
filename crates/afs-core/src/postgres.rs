@@ -28,6 +28,11 @@ const DIR_MODE: i64 = 0o040755;
 /// Advisory-lock key that serializes concurrent schema bootstraps (`init`).
 const MIGRATION_LOCK_KEY: i64 = 0x0af5_0000_dbdb;
 
+/// Advisory-lock key that serializes change-feed appends so a row's `seq`
+/// commits in assignment order (H6). Held for the tiny insert+notify only.
+/// Public so ops (and tests) can reason about the workspace's advisory locks.
+pub const FEED_LOCK_KEY: i64 = 0x0af5_0000_feed;
+
 /// Max events a single subscription `drain` pulls at once, so a lagging or
 /// from-zero subscriber pages the backlog instead of loading it all into memory.
 const DRAIN_BATCH: i64 = 1024;
@@ -111,17 +116,24 @@ impl PostgresMetadataStore {
 
         // The connection future both drives the socket and surfaces async
         // NOTIFYs; forward each notification to the receiver as a bare wakeup.
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        // A capacity-1 channel bounds memory and coalesces: a wakeup only means
+        // "re-drain", so if one is already pending a burst of NOTIFYs collapses
+        // into it instead of accreting an unbounded backlog (L5). The single
+        // drained query is the source of truth, so no event is lost by coalescing.
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        let driver = tokio::spawn(async move {
             let mut stream =
                 futures::stream::poll_fn(move |cx| Pin::new(&mut connection).poll_message(cx));
             while let Some(msg) = stream.next().await {
                 match msg {
-                    Ok(AsyncMessage::Notification(_)) => {
-                        if tx.send(()).is_err() {
-                            break; // the subscriber was dropped
-                        }
-                    }
+                    Ok(AsyncMessage::Notification(_)) => match tx.try_send(()) {
+                        Ok(()) => {}
+                        // A wakeup is already queued; the re-drain will see this
+                        // change too, so dropping the extra wakeup is correct.
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+                        // The subscriber was dropped.
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => break,
+                    },
                     Ok(_) => {}
                     Err(_) => break,
                 }
@@ -138,6 +150,7 @@ impl PostgresMetadataStore {
             wakeups: rx,
             cursor: after_seq,
             branch,
+            driver,
         })
     }
 }
@@ -146,9 +159,19 @@ impl PostgresMetadataStore {
 /// down the dedicated connection and stops the feed.
 pub struct EventSubscription {
     client: tokio_postgres::Client,
-    wakeups: tokio::sync::mpsc::UnboundedReceiver<()>,
+    wakeups: tokio::sync::mpsc::Receiver<()>,
     cursor: i64,
     branch: Option<String>,
+    /// The task draining the dedicated connection and forwarding NOTIFYs. Held
+    /// so it is aborted when the subscription drops, rather than leaked (L5).
+    driver: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for EventSubscription {
+    fn drop(&mut self) {
+        // Stop the forwarder task; the dedicated connection closes with `client`.
+        self.driver.abort();
+    }
 }
 
 impl EventSubscription {
@@ -754,8 +777,23 @@ impl MetadataStore for PostgresMetadataStore {
     }
 
     async fn append_event(&self, ev: EventInit, ts: i64) -> Result<i64> {
-        let c = self.client().await?;
-        let row = c
+        let mut c = self.client().await?;
+        let tx = c.transaction().await?;
+        // Serialize appends so `seq` commits in assignment order (H6). `seq` is an
+        // identity assigned at INSERT, but a row only becomes *visible* at COMMIT;
+        // under concurrency a higher seq could commit first, and a tailer that
+        // advanced its cursor past it would never deliver the lower seq once it
+        // finally committed — a silently dropped change. Holding this lock from
+        // before the INSERT until COMMIT means a lower seq is always committed
+        // (and visible) before any higher seq is even assigned, so the feed's
+        // `seq > cursor` scan can't skip one. It also makes the branch-filter
+        // cursor's jump to `max(seq)` safe (L7). The critical section is just the
+        // insert+notify, so contention is minimal. (A rollback still burns an
+        // identity value, but that leaves a *permanent* gap the reader correctly
+        // ignores — only *transient* gaps drop events.)
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&FEED_LOCK_KEY])
+            .await?;
+        let row = tx
             .query_one(
                 "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts, branch)
                  VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING seq",
@@ -771,11 +809,14 @@ impl MetadataStore for PostgresMetadataStore {
             )
             .await?;
         let seq: i64 = row.get(0);
-        // Push the new seq to LISTEN consumers of the change feed.
-        let chan = EVENT_CHANNEL;
+        // NOTIFY in the same transaction: Postgres queues it and delivers on
+        // commit, discarding it on rollback. So the row and its wakeup are atomic
+        // — closing the window where the row committed but a separate NOTIFY
+        // failed and the caller retried, duplicating the event (L4).
         let payload = seq.to_string();
-        c.execute("SELECT pg_notify($1, $2)", &[&chan, &payload])
+        tx.execute("SELECT pg_notify($1, $2)", &[&EVENT_CHANNEL, &payload])
             .await?;
+        tx.commit().await?;
         Ok(seq)
     }
 

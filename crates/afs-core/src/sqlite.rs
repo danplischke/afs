@@ -852,6 +852,29 @@ impl MetaTxn for SqliteTxn {
         Ok(())
     }
 
+    async fn set_content_if(
+        &mut self,
+        ino: Ino,
+        expected: Option<&Hash>,
+        content: Option<Hash>,
+        size: u64,
+    ) -> Result<bool> {
+        // `IS` is SQLite's null-safe equality, so this matches a NULL (empty)
+        // current content too.
+        let n = self.conn().execute(
+            "UPDATE inode SET content_hash = ?1, size = ?2, mtime = ?3, ctime = ?3
+             WHERE ino = ?4 AND content_hash IS ?5",
+            params![
+                content.map(|h| h.to_hex()),
+                size as i64,
+                now_secs(),
+                ino,
+                expected.map(|h| h.to_hex())
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()> {
         self.conn().execute(
             "UPDATE inode SET nlink = ?1 WHERE ino = ?2",

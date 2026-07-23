@@ -277,3 +277,30 @@ async fn checkout_rolls_back_and_keeps_the_tree_on_a_missing_object() {
     // ...and the previous working tree survived intact (the transaction rolled back).
     assert_eq!(&fs.read("/keep.txt").await.unwrap()[..], b"hello");
 }
+
+// SEC (security audit #13/#18): accept_suggestion applies the proposed content
+// atomically via write_as_expecting — the write only lands if the file is still
+// at the base it was proposed against, so a change that slips in after the
+// staleness check can't be silently clobbered (optimistic concurrency).
+#[tokio::test]
+async fn write_as_expecting_is_a_content_cas() {
+    let fs = fixture().await;
+    let actor = fs.create_human("dan", None).await.unwrap();
+    let ctx = WriteCtx::actor(actor);
+    fs.write_as(ctx, "/f.txt", b"base").await.unwrap();
+
+    // the file's current content hash — what a suggestion records as its base.
+    let base = fs.vfs_lookup(INO_ROOT, "f.txt").await.unwrap().unwrap().content;
+
+    // expecting the wrong base => Conflict, and the file is left untouched.
+    let wrong = Some(Hash::of(b"not the current manifest"));
+    assert!(matches!(
+        fs.write_as_expecting(ctx, "/f.txt", b"proposed", wrong).await,
+        Err(AfsError::Conflict(_))
+    ));
+    assert_eq!(&fs.read("/f.txt").await.unwrap()[..], b"base");
+
+    // expecting the real base => the write applies.
+    fs.write_as_expecting(ctx, "/f.txt", b"proposed", base).await.unwrap();
+    assert_eq!(&fs.read("/f.txt").await.unwrap()[..], b"proposed");
+}

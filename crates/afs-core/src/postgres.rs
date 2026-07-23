@@ -1039,6 +1039,30 @@ impl MetaTxn for PostgresTxn {
         Ok(())
     }
 
+    async fn set_content_if(
+        &mut self,
+        ino: Ino,
+        expected: Option<&Hash>,
+        content: Option<Hash>,
+        size: u64,
+    ) -> Result<bool> {
+        let new_hex = content.map(|h| h.to_hex());
+        let expected_hex = expected.map(|h| h.to_hex());
+        let size = size as i64;
+        let now = now_secs();
+        // `IS NOT DISTINCT FROM` is Postgres's null-safe equality (matches a NULL
+        // current content too).
+        let n = self
+            .conn()
+            .execute(
+                "UPDATE inode SET content_hash = $1, size = $2, mtime = $3, ctime = $3
+                 WHERE ino = $4 AND content_hash IS NOT DISTINCT FROM $5",
+                &[&new_hex, &size, &now, &ino, &expected_hex],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()> {
         self.conn()
             .execute("UPDATE inode SET nlink = $1 WHERE ino = $2", &[&nlink, &ino])

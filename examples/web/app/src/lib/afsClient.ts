@@ -158,14 +158,14 @@ export class AfsClient {
   }
 
   /**
-   * Propose an edit through the app layer (/api/suggest), which also stashes the
-   * proposed text so it can be reviewed inline. Same attribution as the raw
-   * router suggest — the write is agent-authored and not applied until kept.
+   * Propose an edit (agent-authored, not applied until kept). Goes through the
+   * afs router; the inline review reads the proposed content back from afs via
+   * `suggestionDetail`, so nothing is stashed app-side.
    */
   async suggest(path: string, text: string, summary?: string): Promise<number> {
     const q = new URLSearchParams({ path });
     if (summary) q.set("summary", summary);
-    const res = await fetch(`${this.base}/api/suggest?${q}`, {
+    const res = await fetch(`${this.base}/fs/suggestions?${q}`, {
       method: "POST",
       headers: this.authHeaders({ "Content-Type": "application/octet-stream" }),
       body: new Blob([text], { type: "application/octet-stream" }),

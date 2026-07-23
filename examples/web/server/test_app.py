@@ -103,7 +103,7 @@ def test_inline_review_detail_exposes_hunks():
     with TestClient(app) as c:
         c.put("/fs/files/r.md", content=b"line one\nline two\nline three\n",
               headers=_auth("tok-ada")).raise_for_status()
-        r = c.post("/api/suggest", params={"path": "/r.md", "summary": "tweak"},
+        r = c.post("/fs/suggestions", params={"path": "/r.md", "summary": "tweak"},
                    content=b"line one CHANGED\nline two\nline three\nline four added\n",
                    headers=_auth("tok-claude"))
         r.raise_for_status()
@@ -120,7 +120,7 @@ def test_inline_partial_keep_credits_the_agent_not_the_reviewer():
     with TestClient(app) as c:
         c.put("/fs/files/p.md", content=b"line one\nline two\nline three\n",
               headers=_auth("tok-ada")).raise_for_status()
-        sid = c.post("/api/suggest", params={"path": "/p.md"},
+        sid = c.post("/fs/suggestions", params={"path": "/p.md"},
                      content=b"line one CHANGED\nline two\nline three\nline four added\n",
                      headers=_auth("tok-claude")).json()["id"]
 
@@ -144,7 +144,7 @@ def test_inline_partial_keep_credits_the_agent_not_the_reviewer():
 def test_inline_keep_all_uses_native_accept():
     with TestClient(app) as c:
         c.put("/fs/files/k.md", content=b"alpha\nbeta\n", headers=_auth("tok-ada")).raise_for_status()
-        sid = c.post("/api/suggest", params={"path": "/k.md"},
+        sid = c.post("/fs/suggestions", params={"path": "/k.md"},
                      content=b"alpha\nbeta\ngamma by claude\n",
                      headers=_auth("tok-claude")).json()["id"]
         r = c.post(f"/api/suggestion/{sid}/apply", json={"keep": [0]}, headers=_auth("tok-grace"))

@@ -1,6 +1,7 @@
 # node / vite
 node_modules/
 dist/
+.vite/
 *.tsbuildinfo
 
 # python

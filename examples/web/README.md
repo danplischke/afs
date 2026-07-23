@@ -162,15 +162,15 @@ cd app && npm run build
 
 ## What afs provides vs. what the app provides
 
-afs is a storage-and-attribution engine, not a user directory or an auth server —
-those are deliberately yours. So the split is:
+afs is a storage-and-attribution engine, not an auth server — that's deliberately
+yours. So the split is:
 
-- **afs** (`/fs`, via `build_router`): files, per-line blame, versioning, diff,
-  the suggestion queue, the change feed, presence — all attribution resolved
-  server-side.
-- **the app** (`/api`): mapping *your* users/agents onto afs actors, an actor
-  **directory** so the id-only feeds (events, suggestions) resolve to a name, a
-  combined document load (text + blame in one call), and the SSE feed. afs
-  embeds the full actor in every blame range; everything else carries just an
-  `actor_id`, and the app is what created those actors — so it's the right place
-  to name them.
+- **afs** (`/fs`, via `build_router`, and its bindings): files, per-line blame,
+  versioning, diff, the suggestion queue (incl. `suggestion_content` to read a
+  proposal's base/proposed text), the change feed, presence, and the actor
+  directory (`list_actors` / `actor(id)` resolve the `actor_id` in the id-only
+  feeds to a name + kind) — all attribution resolved server-side.
+- **the app** (`/api`): just the glue afs leaves to you — mapping *your*
+  users/agents onto afs actors (bearer token → `find_or_create_*`), a combined
+  document load (text + blame in one call), and the SSE feed. No app-side actor
+  table and no proposed-text stash: both come straight from afs.

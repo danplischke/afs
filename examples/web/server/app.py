@@ -46,7 +46,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -69,21 +69,18 @@ PRINCIPALS: dict[str, dict[str, Any]] = {
 
 
 class Identity:
-    """Resolves bearer tokens to afs actors and keeps a directory of everyone we
-    have onboarded, so the UI can turn an ``actor_id`` back into a name + kind.
-
-    A real deployment would back the directory with your user store; here it is
-    seeded from :data:`PRINCIPALS` at startup so every id in the feeds resolves.
-    """
+    """Resolves bearer tokens to afs actors (idempotently) and creates a session
+    on first use. afs owns the actor *records* — the UI resolves the id-only feeds
+    with ``ws.list_actors()`` / ``ws.actor(id)``, so this keeps no directory of its
+    own. A real deployment would resolve tokens against your user store here."""
 
     def __init__(self, ws: "afs.Workspace") -> None:
         self._ws = ws
-        self._ctx: dict[str, afs.WriteCtx] = {}          # token -> WriteCtx (cached)
-        self._directory: dict[int, dict[str, Any]] = {}  # actor_id -> {id, display_name, kind, model}
+        self._ctx: dict[str, afs.WriteCtx] = {}  # token -> WriteCtx (cached)
 
     async def onboard_all(self) -> None:
-        """Pre-create every demo principal's actor so the directory is complete
-        from the first request (before anyone has authenticated or written)."""
+        """Pre-create every demo principal's actor so ``ws.list_actors()`` is
+        complete from the first request (before anyone has authenticated)."""
         for token in PRINCIPALS:
             await self._actor_id_for(token)
 
@@ -92,20 +89,12 @@ class Identity:
         if principal is None:
             raise HTTPException(status_code=401, detail="unknown token")
         if principal["kind"] == "agent":
-            actor_id = await self._ws.find_or_create_agent(
+            return await self._ws.find_or_create_agent(
                 principal["external_id"], principal["name"], principal["model"]
             )
-        else:
-            actor_id = await self._ws.find_or_create_human(
-                principal["external_id"], principal["name"]
-            )
-        self._directory[actor_id] = {
-            "id": actor_id,
-            "display_name": principal["name"],
-            "kind": principal["kind"],
-            "model": principal.get("model"),
-        }
-        return actor_id
+        return await self._ws.find_or_create_human(
+            principal["external_id"], principal["name"]
+        )
 
     async def ctx_for_token(self, token: str) -> "afs.WriteCtx":
         """Resolve a token to the :class:`afs.WriteCtx` its writes attribute to,
@@ -118,12 +107,6 @@ class Identity:
         ctx = afs.WriteCtx.session(actor_id, session_id)
         self._ctx[token] = ctx
         return ctx
-
-    def directory(self) -> list[dict[str, Any]]:
-        return list(self._directory.values())
-
-    def resolve(self, actor_id: int) -> Optional[dict[str, Any]]:
-        return self._directory.get(actor_id)
 
 
 def bearer_token(authorization: Optional[str] = Header(default=None)) -> str:
@@ -163,10 +146,6 @@ async def lifespan(app: FastAPI):
     # fresh TestClient per test) swaps the workspace without stacking routers.
     app.state.ws = ws
     app.state.identity = identity
-    # Proposed text stashed by suggestion id, so the inline review can render a
-    # line diff and reconstruct a partial keep. In-memory (demo); a real app would
-    # read the proposed content back from afs by hash.
-    app.state.proposed = {}
     try:
         yield
     finally:
@@ -194,10 +173,6 @@ app.add_middleware(
 # --- app-level convenience endpoints (/api/*) -------------------------------
 # Everything afs-native lives under /fs (the router). These add the few things a
 # UI wants on top: identity, an actor directory, a combined doc load, and a feed.
-
-
-def _identity(request: Request) -> Identity:
-    return request.app.state.identity
 
 
 def _ws(request: Request) -> "afs.Workspace":
@@ -246,10 +221,23 @@ async def config() -> dict[str, Any]:
     }
 
 
+def _actor_view(a: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """The compact actor shape the UI wants, from an afs actor dict."""
+    if a is None:
+        return {}
+    return {
+        "id": a["id"],
+        "display_name": a["display_name"],
+        "kind": a["kind"],
+        "model": a.get("agent_model"),
+    }
+
+
 @app.get("/api/me")
 async def me(request: Request, ctx: "afs.WriteCtx" = Depends(_authn)) -> dict[str, Any]:
-    """Who the presented token authenticates as (the resolved afs actor)."""
-    info = _identity(request).resolve(ctx.actor_id) or {}
+    """Who the presented token authenticates as — the actor resolved from afs by
+    id (``ws.actor``), no app-side directory."""
+    info = _actor_view(await _ws(request).actor(ctx.actor_id))
     return {
         "actor_id": ctx.actor_id,
         "session_id": ctx.session_id,
@@ -261,10 +249,10 @@ async def me(request: Request, ctx: "afs.WriteCtx" = Depends(_authn)) -> dict[st
 
 @app.get("/api/actors")
 async def actors(request: Request) -> list[dict[str, Any]]:
-    """The actor directory: resolve the ``actor_id`` carried by events,
-    suggestions, and ``resolved_by`` back to a name + kind. (Blame already
-    embeds the full actor; this is for the id-only feeds.)"""
-    return _identity(request).directory()
+    """Resolve the ``actor_id`` carried by events, suggestions, and ``resolved_by``
+    to a name + kind — straight from afs (``ws.list_actors``), no app-side table.
+    (Blame already embeds the full actor; this is for the id-only feeds.)"""
+    return [_actor_view(a) for a in await _ws(request).list_actors()]
 
 
 @app.get("/api/doc/{path:path}")
@@ -326,17 +314,6 @@ async def feed(request: Request, since: int = 0):
 # credited for its lines and the reviewer never is.
 
 
-def _abs(path: str) -> str:
-    return path if path.startswith("/") else "/" + path
-
-
-async def _read_text(ws: "afs.Workspace", path: str) -> str:
-    try:
-        return bytes(await ws.read(path)).decode("utf-8", errors="replace")
-    except FileNotFoundError:
-        return ""
-
-
 def _segments(base: str, proposed: str) -> tuple[list[dict[str, Any]], int]:
     """Line-diff base→proposed as a list of segments. Each changed segment is a
     'hunk' with an index; equal segments carry the shared lines. The frontend
@@ -372,49 +349,27 @@ class _ApplyReq(BaseModel):
     keep: list[int]  # hunk indices to keep
 
 
-@app.post("/api/suggest")
-async def suggest(
-    request: Request,
-    path: str = Query(...),
-    summary: Optional[str] = Query(default=None),
-    body: bytes = Body(default=b""),
-    ctx: "afs.WriteCtx" = Depends(_authn),
-) -> dict[str, Any]:
-    """Propose an edit *and* stash the proposed text, so the inline review can
-    diff it. Same attribution as the router's /fs/suggestions (agent-authored,
-    not applied until accepted) — this just also remembers the bytes."""
-    ws = _ws(request)
-    sid = await ws.suggest(ctx, _abs(path), body, summary)
-    request.app.state.proposed[sid] = body.decode("utf-8", errors="replace")
-    return {"id": sid}
-
-
 @app.get("/api/suggestion/{sid}")
 async def suggestion_detail(request: Request, sid: int) -> dict[str, Any]:
-    """A pending suggestion as an inline line diff (base vs proposed)."""
+    """A pending suggestion as an inline line diff. Base + proposed content come
+    straight from afs (``ws.suggestion_content``) — no app-side stash — so this
+    works for *any* suggestion, including ones proposed via the raw /fs route."""
     ws = _ws(request)
     sug = await ws.get_suggestion(sid)
     if sug is None:
         raise HTTPException(status_code=404, detail=f"no suggestion #{sid}")
-    info = _identity(request).resolve(sug["actor_id"])
-    base = await _read_text(ws, sug["path"])
-    proposed = request.app.state.proposed.get(sid)
-    out: dict[str, Any] = {
+    actor = await ws.actor(sug["actor_id"])
+    content = await ws.suggestion_content(sid)
+    base, proposed = content["base"], content["proposed"] or ""
+    segs, total = _segments(base, proposed)
+    return {
         **sug,
-        "actor_name": info["display_name"] if info else f"actor #{sug['actor_id']}",
-        "actor_kind": info["kind"] if info else "agent",
+        "actor_name": actor["display_name"] if actor else f"actor #{sug['actor_id']}",
+        "actor_kind": actor["kind"] if actor else "agent",
         "base_text": base,
+        "segments": segs,
+        "hunks": total,
     }
-    if proposed is None:
-        # Not stashed (e.g. proposed straight to /fs) — fall back to the unified
-        # diff; the UI shows it read-only and routes accept/reject to the queue.
-        out["segments"] = None
-        out["unified"] = await ws.suggestion_diff(sid)
-    else:
-        segs, total = _segments(base, proposed)
-        out["segments"] = segs
-        out["hunks"] = total
-    return out
 
 
 @app.post("/api/suggestion/{sid}/apply")
@@ -431,11 +386,9 @@ async def apply_suggestion(
     sug = await ws.get_suggestion(sid)
     if sug is None:
         raise HTTPException(status_code=404, detail=f"no suggestion #{sid}")
-    proposed = request.app.state.proposed.get(sid)
-    if proposed is None:
-        raise HTTPException(status_code=400, detail="no stashed proposal; use the queue accept/reject")
 
-    base = await _read_text(ws, sug["path"])
+    content = await ws.suggestion_content(sid)
+    base, proposed = content["base"], content["proposed"] or ""
     segs, total = _segments(base, proposed)
     keep = {i for i in req.keep if 0 <= i < total}
 
@@ -451,7 +404,6 @@ async def apply_suggestion(
         agent_ctx = afs.WriteCtx.session(agent_id, agent_session)
         await ws.write_as(agent_ctx, sug["path"], merged.encode("utf-8"))
     await ws.reject_suggestion(sid, ctx)  # original proposal resolved (superseded)
-    request.app.state.proposed.pop(sid, None)
     return {"applied": True, "mode": "partial", "kept": len(keep), "total": total}
 
 
@@ -462,7 +414,7 @@ async def index() -> dict[str, Any]:
         "afs_api": "/fs (files, blame, commit, log, diff, suggestions, events, presence)",
         "app_api": [
             "/api/config", "/api/me", "/api/actors", "/api/doc/{path}", "/api/feed",
-            "/api/suggest", "/api/suggestion/{id}", "/api/suggestion/{id}/apply",
+            "/api/suggestion/{id}", "/api/suggestion/{id}/apply",
         ],
         "how": "send Authorization: Bearer <token>; writes are attributed to that principal",
         "frontend": "run the Vite app in ../app and open http://localhost:5173",

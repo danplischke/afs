@@ -70,6 +70,9 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install maturin pytest
+          # fastapi + httpx are needed by tests/test_fastapi_router.py — it
+          # imports afs.fastapi (the router integration) and fastapi's TestClient,
+          # which rides on httpx. They are test-only deps, not runtime deps of afs.
+          pip install maturin pytest fastapi httpx
           maturin develop
           pytest -q tests

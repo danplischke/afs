@@ -95,6 +95,10 @@ pub trait MetadataStore: Send + Sync {
 
     async fn get_config(&self, key: &str) -> Result<Option<String>>;
     async fn set_config(&self, key: &str, value: &str) -> Result<()>;
+    /// Atomically increment the integer config counter at `key` (creating it at
+    /// `1`) and return the new value. A single statement, so concurrent callers
+    /// each get a distinct, strictly increasing value — unlike a read-then-write.
+    async fn bump_counter(&self, key: &str) -> Result<i64>;
 
     // --- working tree ----------------------------------------------------
 
@@ -205,6 +209,18 @@ pub trait MetaTxn: Send {
     async fn create_inode(&mut self, init: InodeInit) -> Result<Ino>;
     /// Set an inode's content address and size.
     async fn set_content(&mut self, ino: Ino, content: Option<Hash>, size: u64) -> Result<()>;
+    /// Compare-and-set an inode's content: apply `content`/`size` only if the
+    /// inode's current content still equals `expected` (null-safe), returning
+    /// whether it applied. Lets an attributed write be conditional on the file not
+    /// having changed since it was read — the atomic apply behind a suggestion
+    /// accept (optimistic concurrency; no lost updates).
+    async fn set_content_if(
+        &mut self,
+        ino: Ino,
+        expected: Option<&Hash>,
+        content: Option<Hash>,
+        size: u64,
+    ) -> Result<bool>;
     /// Set an inode's link count.
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()>;
     /// Delete an inode (and any symlink row).
@@ -298,6 +314,9 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         (**self).set_config(key, value).await
+    }
+    async fn bump_counter(&self, key: &str) -> Result<i64> {
+        (**self).bump_counter(key).await
     }
     async fn truncate_tree(&self) -> Result<()> {
         (**self).truncate_tree().await

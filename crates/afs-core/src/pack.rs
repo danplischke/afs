@@ -172,7 +172,9 @@ impl PackStore {
                 p.size -= b.len();
             }
         }
-        let Pending { order, resident, .. } = &mut *p;
+        let Pending {
+            order, resident, ..
+        } = &mut *p;
         order.retain(|h| resident.contains_key(h));
         Ok(())
     }

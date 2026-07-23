@@ -23,12 +23,7 @@ const SYMLINK_MODE: u32 = 0o120777;
 /// never be *stored* — which is what stops it from later escaping during a host
 /// materialization such as the sandbox's `export_tree` (`host_dir.join("..")`).
 pub(crate) fn validate_component(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\0')
-    {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
         return Err(AfsError::InvalidPath(format!(
             "invalid path component: {name:?}"
         )));

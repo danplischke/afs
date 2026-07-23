@@ -19,7 +19,7 @@ use crate::content::ContentStore;
 use crate::engine::Fs;
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
-use crate::types::Ino;
+use crate::types::{Hash, Ino};
 use crate::util::now_secs;
 use similar::{ChangeTag, TextDiff};
 use std::collections::{HashMap, VecDeque};
@@ -349,6 +349,31 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Write `data` to `path`, attributing the change to `ctx`'s actor and
     /// updating per-line authorship. Creates the file if needed.
     pub async fn write_as(&self, ctx: WriteCtx, path: &str, data: &[u8]) -> Result<()> {
+        self.write_as_inner(ctx, path, data, None).await
+    }
+
+    /// Like [`write_as`](Self::write_as), but applies the write only if `path`'s
+    /// current content still equals `expected` (null-safe: `None` = "expected to
+    /// be absent/empty"), returning [`AfsError::Conflict`] otherwise. The check
+    /// and the write commit atomically, so an accepted suggestion can't clobber a
+    /// concurrent update that slipped in after its staleness check (audit #13/#18).
+    pub async fn write_as_expecting(
+        &self,
+        ctx: WriteCtx,
+        path: &str,
+        data: &[u8],
+        expected: Option<Hash>,
+    ) -> Result<()> {
+        self.write_as_inner(ctx, path, data, Some(expected)).await
+    }
+
+    async fn write_as_inner(
+        &self,
+        ctx: WriteCtx,
+        path: &str,
+        data: &[u8],
+        expect: Option<Option<Hash>>,
+    ) -> Result<()> {
         let (parent, name) = self.resolve_parent(path).await?;
         self.ensure_dir(parent).await?;
         let existing = self.lookup_file(parent, name, path).await?;
@@ -406,7 +431,22 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         if let Some(h) = mhash {
             tx.set_blob_blame(&h, &blame.encode()).await?;
         }
-        tx.set_content(ino, mhash, size).await?;
+        match &expect {
+            None => tx.set_content(ino, mhash, size).await?,
+            // Conditional apply: only write if the content is still what the
+            // caller based this write on. On mismatch the whole transaction rolls
+            // back (undoing the blame staged just above), so nothing is clobbered.
+            Some(expected) => {
+                if !tx
+                    .set_content_if(ino, expected.as_ref(), mhash, size)
+                    .await?
+                {
+                    return Err(AfsError::Conflict(format!(
+                        "{path} changed since the write was based on it"
+                    )));
+                }
+            }
+        }
         tx.append_edit_op(EditOpInit {
             session_id: ctx.session,
             actor_id: ctx.actor,

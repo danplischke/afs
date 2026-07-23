@@ -168,9 +168,11 @@ refcounting from live refs**: roots = all branch/tag/HEAD refs + reflog + retain
 trees→blobs→chunks to build the live set; sweep unreferenced content after a grace period. GC takes a ref-set
 snapshot and never deletes anything reachable from a ref created during the sweep (see §7 race note).
 
-**At rest.** Per-chunk optional **zstd** compression and **AES-256-GCM** encryption; because addressing is by
-plaintext hash, dedup survives encryption (convergent encryption optional per-workspace if cross-tenant dedup
-is undesirable — default off).
+**At rest.** Per-chunk optional **zstd** compression and opt-in **XChaCha20-Poly1305** encryption (default off; a
+256-bit AEAD keyed by a raw 32-byte key or an **Argon2id**-derived passphrase key with a per-store salt — §7).
+The 192-bit nonce is derived from the plaintext hash, so identical plaintext yields identical ciphertext and
+dedup survives encryption (convergent encryption; optional per-workspace keying if cross-tenant dedup is
+undesirable). The wrong key fails loudly — the AEAD tag won't verify — rather than returning garbage.
 
 ### 4b. Pluggable metadata database (Postgres-first, SQLite solo mode)
 
@@ -491,7 +493,7 @@ ranges with zero manual bookkeeping.
 
 ---
 
-## 7. Cross-cutting hazards (from the integration review) and how we handle them
+## 7. Cross-cutting hazards (from the integration & security reviews) and how we handle them
 
 - **Object-store latency vs POSIX (`fsync`, mmap, close-to-open):** never make FUSE block on S3 in the hot path.
   Writes hit the **local cache tier** first; write-back to S3 is async and batched; `fsync` guarantees *cache*
@@ -517,6 +519,41 @@ ranges with zero manual bookkeeping.
   (blame/audit/actors) and uncommitted edits are **not** recoverable: they live only in the DB, so it remains the
   component to back up (Postgres PITR/replica; SQLite continuous replication).
 
+The remaining hazards came out of the **security review** — attribution is only trustworthy if the identity behind
+each write is, and a storage engine that agents point at untrusted code and untrusted objects has to fail closed:
+
+- **Client-named actors (attribution forgery):** identity is **resolved server-side and never taken from the
+  request**. The HTTP/JSON body never carries an actor; `build_api_auth` binds the caller to an actor from the
+  bearer credential and *refuses* to expose an unauthenticated API on a non-loopback address. Reads are open by
+  default but gate behind the same credential when `ApiOptions::gate_reads` is set (via the `require_auth`
+  layer; `/health` stays open). MCP and CLI resolve their own actor the same way — no surface trusts a name.
+- **Poisoned path components:** a single name containing `.`, `..`, `/`, or NUL is rejected at *every* metadata
+  boundary (`validate_component`), so a hostile name can never be **stored** — which is what stops it escaping
+  later during host materialization (the sandbox's `export_tree`, a FUSE/NFS lookup). Every inode-oriented op
+  validates names, not just the top-level path parser.
+- **Adversarial encoded objects (decode-time DoS):** the object-graph and git-object decoders are bounded —
+  length prefixes are capped and inflate is size-limited — so a malformed or maliciously huge object surfaces as
+  an error instead of an unbounded allocation. Git OIDs and git-LFS pointers are validated before they are used
+  as keys.
+- **Torn multi-step mutations:** operations that touch several rows run inside a single `MetaTxn` that rolls back
+  on drop, so a crash or mid-way error can't leave a half-applied state. Working-tree replacement
+  (checkout/merge/recover) swaps the tree atomically (`truncate_tree` + `replace_working_tree`); `accept` lands a
+  suggestion only if the author's base still matches (null-safe compare-and-set, `set_content_if`, so a stale
+  proposal is rejected rather than silently clobbering a concurrent edit); ref-mirror generations advance with an
+  atomic `bump_counter` instead of a read-modify-write.
+- **Encryption key & nonce discipline:** convergent encryption keeps dedup (identical plaintext → identical
+  ciphertext, which the shared content address already revealed — a documented, accepted trade-off), but the AEAD
+  fails closed everywhere else: `put_keyed` refuses any non-content-addressed key, so a mutable-value keyed store
+  can't be wrapped in encryption and made to reuse an (key, nonce) pair; and passphrase keys are derived with
+  **Argon2id** (memory-hard) over a per-store random salt kept beside the content store — a weak passphrase is
+  expensive to brute-force offline and the same passphrase never derives the same key across two stores.
+- **Running untrusted agent code (sandbox boundary):** `afs sandbox` / `afs overlay` are **edit-capture, not a
+  security boundary by default** — the child runs with your privileges over a copy-on-write view, so the host FS
+  (incl. `meta.db`/`cas`) stays reachable; run only trusted code. Passing `--isolate` runs the command under
+  **bubblewrap** in a fresh tmpfs root that hides the host filesystem (`meta.db`/`cas`, home, credentials) — a
+  real *filesystem* boundary for untrusted code. Network egress is left shared on purpose (agents need it), so it
+  is deliberately not a network boundary; the delta is captured and imported the same either way.
+
 ---
 
 ## 8. Recommended tech stack
@@ -527,7 +564,8 @@ ranges with zero manual bookkeeping.
   `bazil.org/fuse`) if team familiarity dominates — but we lose the single-core-shared-with-bindings advantage.
 - **Metadata:** `sqlx` (compile-time-checked, supports Postgres + SQLite), `deadpool` pooling, `refinery`
   migrations. Postgres 15+.
-- **Content:** `aws-sdk-s3` (works with S3/R2/GCS/MinIO), `blake3`, a FastCDC crate, `zstd`, `aes-gcm`.
+- **Content:** `object_store` (works with S3/R2/GCS/MinIO), `blake3`, a FastCDC crate, `zstd`,
+  `chacha20poly1305` (XChaCha20 AEAD) + `argon2` (passphrase KDF).
 - **Access:** `fuser` (FUSE), an NFSv4 server crate or `nfs-rs` for macOS, `rmcp`/an MCP server crate, `axum` +
   `tonic` for HTTP/gRPC, `yrs` (Yjs in Rust) for opt-in CRDT co-editing.
 
@@ -546,7 +584,7 @@ ranges with zero manual bookkeeping.
 | **M6 — Attribution** | actor/session registry; `edit_op` capture wired through the write path; `blame` index; blame API + xattr; merge/rebase blame survival | **Per-actor attribution + blame** (goal 4) |
 | **M7 — Access surfaces** | FUSE mount; MCP server (auto-attributed tool calls); HTTP/gRPC control API; NFS for macOS | Agents + humans actually use it as a filesystem |
 | **M8 — Live collaboration** | shared working tree with advisory-lock coordination; `watch`/NOTIFY; opt-in CRDT co-editing; offline solo + reconnect-merge | **Shared human+agent live workspace** (goal 4, live) |
-| **M9 — Hardening** | GC (mark-sweep + grace); encryption/compression; metrics/tracing; benchmarks | Production readiness |
+| **M9 — Hardening** | GC (mark-sweep + grace); encryption/compression; metrics/tracing; benchmarks; **security review** — server-side identity + API auth, name/OID validation & bounded decoders, transactional atomicity, Argon2id at-rest keys, opt-in bubblewrap sandbox isolation (§7) | Production readiness |
 
 Each milestone is independently demoable; M1+M2+M3 in either order after M0.
 

@@ -401,6 +401,19 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    async fn bump_counter(&self, key: &str) -> Result<i64> {
+        let conn = self.lock();
+        // One atomic upsert: create at 1, else increment the stored integer.
+        let v: i64 = conn.query_row(
+            "INSERT INTO config(key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+             RETURNING CAST(value AS INTEGER)",
+            params![key],
+            |r| r.get(0),
+        )?;
+        Ok(v)
+    }
+
     async fn truncate_tree(&self) -> Result<()> {
         let conn = self.lock();
         // Blame is keyed by content hash (blob_blame), not by inode, so it is
@@ -657,7 +670,15 @@ impl MetadataStore for SqliteMetadataStore {
         conn.execute(
             "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts, branch)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![ev.actor_id, ev.session_id, ev.kind, ev.path, ev.detail, ts, ev.branch],
+            params![
+                ev.actor_id,
+                ev.session_id,
+                ev.kind,
+                ev.path,
+                ev.detail,
+                ts,
+                ev.branch
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -785,10 +806,7 @@ impl MetadataStore for SqliteMetadataStore {
              WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR path = ?2)
              ORDER BY id DESC",
         )?;
-        let rows = stmt.query_map(
-            params![status.map(|s| s.as_str()), path],
-            row_to_suggestion,
-        )?;
+        let rows = stmt.query_map(params![status.map(|s| s.as_str()), path], row_to_suggestion)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -850,6 +868,29 @@ impl MetaTxn for SqliteTxn {
             params![content.map(|h| h.to_hex()), size as i64, now_secs(), ino],
         )?;
         Ok(())
+    }
+
+    async fn set_content_if(
+        &mut self,
+        ino: Ino,
+        expected: Option<&Hash>,
+        content: Option<Hash>,
+        size: u64,
+    ) -> Result<bool> {
+        // `IS` is SQLite's null-safe equality, so this matches a NULL (empty)
+        // current content too.
+        let n = self.conn().execute(
+            "UPDATE inode SET content_hash = ?1, size = ?2, mtime = ?3, ctime = ?3
+             WHERE ino = ?4 AND content_hash IS ?5",
+            params![
+                content.map(|h| h.to_hex()),
+                size as i64,
+                now_secs(),
+                ino,
+                expected.map(|h| h.to_hex())
+            ],
+        )?;
+        Ok(n == 1)
     }
 
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()> {

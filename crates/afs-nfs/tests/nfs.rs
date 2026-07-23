@@ -50,7 +50,10 @@ async fn maps_reads_and_lookups() {
     assert_eq!(nfs.root_dir(), 1);
 
     let docs = nfs.lookup(1, &fname("docs")).await.unwrap();
-    assert!(matches!(nfs.getattr(docs).await.unwrap().ftype, ftype3::NF3DIR));
+    assert!(matches!(
+        nfs.getattr(docs).await.unwrap().ftype,
+        ftype3::NF3DIR
+    ));
 
     let file = nfs.lookup(docs, &fname("readme.txt")).await.unwrap();
     let a: fattr3 = nfs.getattr(file).await.unwrap();
@@ -77,7 +80,10 @@ async fn create_write_mkdir_symlink_rename_remove() {
     let docs = nfs.lookup(1, &fname("docs")).await.unwrap();
 
     // create + write + read back
-    let (nf, _) = nfs.create(docs, &fname("new.txt"), no_attrs()).await.unwrap();
+    let (nf, _) = nfs
+        .create(docs, &fname("new.txt"), no_attrs())
+        .await
+        .unwrap();
     nfs.write(nf, 0, b"written via nfs").await.unwrap();
     assert_eq!(nfs.read(nf, 0, 100).await.unwrap().0, b"written via nfs");
 
@@ -101,7 +107,9 @@ async fn create_write_mkdir_symlink_rename_remove() {
     assert_eq!(nfs.readlink(lnk).await.unwrap().0, b"readme.txt");
 
     // rename + remove
-    nfs.rename(docs, &fname("new.txt"), docs, &fname("moved.txt")).await.unwrap();
+    nfs.rename(docs, &fname("new.txt"), docs, &fname("moved.txt"))
+        .await
+        .unwrap();
     assert!(nfs.lookup(docs, &fname("moved.txt")).await.is_ok());
     assert!(matches!(
         nfs.lookup(docs, &fname("new.txt")).await,

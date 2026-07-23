@@ -122,13 +122,17 @@ async fn live_sync_imports_only_changes() {
     assert_eq!(sync.sync(&ws, &upper).await.unwrap(), 0);
 
     // 3) an edit (size differs) is re-imported; unrelated files stay put.
-    tokio::fs::write(upper.join("a.txt"), b"one-plus-more").await.unwrap();
+    tokio::fs::write(upper.join("a.txt"), b"one-plus-more")
+        .await
+        .unwrap();
     assert_eq!(sync.sync(&ws, &upper).await.unwrap(), 1);
     assert_eq!(&ws.read("/a.txt").await.unwrap()[..], b"one-plus-more");
 
     // 4) a nested file and a symlink in one tick.
     tokio::fs::create_dir_all(upper.join("sub")).await.unwrap();
-    tokio::fs::write(upper.join("sub/b.txt"), b"nested").await.unwrap();
+    tokio::fs::write(upper.join("sub/b.txt"), b"nested")
+        .await
+        .unwrap();
     std::os::unix::fs::symlink("a.txt", upper.join("link")).unwrap();
     assert_eq!(sync.sync(&ws, &upper).await.unwrap(), 2);
     assert_eq!(&ws.read("/sub/b.txt").await.unwrap()[..], b"nested");
@@ -176,7 +180,13 @@ async fn run_live_streams_changes_to_afs() {
 
     // afs reflects every change, attributed to the agent.
     assert_eq!(&ws.read("/new.txt").await.unwrap()[..], b"created\n");
-    assert_eq!(&ws.read("/keep.txt").await.unwrap()[..], b"original\nmore\n");
-    assert!(ws.stat("/gone.txt").await.is_err(), "the deletion was synced");
+    assert_eq!(
+        &ws.read("/keep.txt").await.unwrap()[..],
+        b"original\nmore\n"
+    );
+    assert!(
+        ws.stat("/gone.txt").await.is_err(),
+        "the deletion was synced"
+    );
     assert_eq!(ws.blame("/new.txt").await.unwrap()[0].actor.id, agent);
 }

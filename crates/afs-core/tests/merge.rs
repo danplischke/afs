@@ -200,7 +200,10 @@ async fn binary_one_sided_edit_auto_resolves() {
     fs.commit("a", "ours").await.unwrap();
 
     let outcome = fs.merge(dev, "a", "merge").await.unwrap();
-    assert!(matches!(outcome, MergeOutcome::Merged(_)), "got {outcome:?}");
+    assert!(
+        matches!(outcome, MergeOutcome::Merged(_)),
+        "got {outcome:?}"
+    );
     assert_eq!(fs.read("/bin").await.unwrap()[..], theirs[..]);
 }
 

@@ -250,14 +250,16 @@ impl RefSnapshot {
             if off + 2 > bytes.len() {
                 return Err(bad());
             }
-            let nlen = u16::from_le_bytes(bytes[off..off + 2].try_into().map_err(|_| bad())?) as usize;
+            let nlen =
+                u16::from_le_bytes(bytes[off..off + 2].try_into().map_err(|_| bad())?) as usize;
             off += 2;
             if off + nlen + 4 > bytes.len() {
                 return Err(bad());
             }
             let name = String::from_utf8(bytes[off..off + nlen].to_vec()).map_err(|_| bad())?;
             off += nlen;
-            let vlen = u32::from_le_bytes(bytes[off..off + 4].try_into().map_err(|_| bad())?) as usize;
+            let vlen =
+                u32::from_le_bytes(bytes[off..off + 4].try_into().map_err(|_| bad())?) as usize;
             off += 4;
             if off + vlen > bytes.len() {
                 return Err(bad());

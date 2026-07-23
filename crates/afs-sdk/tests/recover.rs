@@ -74,7 +74,11 @@ async fn gc_keeps_the_ref_mirror_so_recovery_still_works() {
     let report = recovered.rebuild().await.unwrap();
     assert!(report.used_mirror, "gc should keep the ref mirror");
     assert_eq!(
-        report.branches.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        report
+            .branches
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
         vec!["main"]
     );
     assert_eq!(&recovered.read("/f.txt").await.unwrap()[..], b"x");

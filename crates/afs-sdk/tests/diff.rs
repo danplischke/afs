@@ -16,13 +16,17 @@ async fn workspace() -> (Workspace, tempfile::TempDir) {
 async fn seeded() -> (Workspace, tempfile::TempDir) {
     let (ws, dir) = workspace().await;
     ws.write("/keep.txt", b"unchanged\n").await.unwrap();
-    ws.write("/edit.txt", b"line one\nline two\n").await.unwrap();
+    ws.write("/edit.txt", b"line one\nline two\n")
+        .await
+        .unwrap();
     ws.write("/gone.txt", b"delete me\n").await.unwrap();
     ws.commit("main", "base").await.unwrap();
 
     ws.create_branch("feature").await.unwrap();
     ws.checkout("feature").await.unwrap();
-    ws.write("/edit.txt", b"line one\nline TWO changed\n").await.unwrap();
+    ws.write("/edit.txt", b"line one\nline TWO changed\n")
+        .await
+        .unwrap();
     ws.write("/new.txt", b"brand new\n").await.unwrap();
     ws.remove("/gone.txt").await.unwrap();
     ws.commit("dev", "feature work").await.unwrap();
@@ -34,8 +38,10 @@ async fn diff_lists_changed_paths_by_status() {
     let (ws, _dir) = seeded().await;
 
     let changes = ws.diff("main", "feature").await.unwrap();
-    let by_path: std::collections::HashMap<_, _> =
-        changes.iter().map(|d| (d.path.as_str(), d.status)).collect();
+    let by_path: std::collections::HashMap<_, _> = changes
+        .iter()
+        .map(|d| (d.path.as_str(), d.status))
+        .collect();
 
     assert_eq!(by_path.get("/edit.txt"), Some(&DiffStatus::Modified));
     assert_eq!(by_path.get("/new.txt"), Some(&DiffStatus::Added));
@@ -57,14 +63,22 @@ async fn diff_file_gives_a_unified_patch() {
     let (ws, _dir) = seeded().await;
 
     let patch = ws.diff_file("main", "feature", "/edit.txt").await.unwrap();
-    assert!(patch.contains("-line two"), "patch shows the removed line:\n{patch}");
+    assert!(
+        patch.contains("-line two"),
+        "patch shows the removed line:\n{patch}"
+    );
     assert!(
         patch.contains("+line TWO changed"),
         "patch shows the added line:\n{patch}"
     );
 
     // an unchanged file diffs to nothing (and costs no content read)
-    assert!(ws.diff_file("main", "feature", "/keep.txt").await.unwrap().is_empty());
+    assert!(
+        ws.diff_file("main", "feature", "/keep.txt")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // an added file shows its whole body as additions
     let added = ws.diff_file("main", "feature", "/new.txt").await.unwrap();

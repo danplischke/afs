@@ -16,7 +16,7 @@ pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, FileKind, GcStats, Hash, Inode, MemStore,
     MergeOutcome, PackStore, Presence, Suggestion, SuggestionInit, SuggestionStatus, TieredStore,
-    ToolCallInit, VersioningMode, WriteCtx,
+    ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -66,7 +66,9 @@ impl Workspace {
     /// SQLite metadata + an S3-compatible object store for content.
     pub async fn open_s3(db_path: impl AsRef<Path>, cfg: S3Config) -> Result<Self> {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
-        let content: Content = Arc::new(ObjectContentStore::s3(cfg)?);
+        // Verify integrity on read: object storage can bit-rot, so a corrupt
+        // object surfaces as `Corrupt` rather than being served as authentic (M1).
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
         Self::open(meta, content).await
     }
 
@@ -98,7 +100,9 @@ impl Workspace {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
         let data: Content = Arc::new(ObjectContentStore::s3(cfg)?);
         let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
-        let content: Content = Arc::new(PackStore::new(data, index));
+        // Verify integrity on read at the outermost (chunk-addressed) layer, so a
+        // bit-rotted pack surfaces as `Corrupt` on the affected chunk (M1).
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(PackStore::new(data, index))));
         Self::open(meta, content).await
     }
 

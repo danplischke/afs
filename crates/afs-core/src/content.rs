@@ -418,3 +418,90 @@ impl ContentStore for TieredStore {
         Ok(freed)
     }
 }
+
+/// A [`ContentStore`] decorator that **verifies integrity on read**: every
+/// object fetched is re-hashed and checked against the address it was fetched by,
+/// so a bit-rotted, truncated, or tampered object surfaces as
+/// [`AfsError::Corrupt`] instead of being served as authentic (audit M1).
+///
+/// Wrap the workspace's *outermost* content store with this. Content addressing
+/// guarantees `Hash::of(get(h)) == h` at that boundary for every composition —
+/// including packing (a chunk's address stays its hash) and encryption
+/// (`EncryptedStore::get` returns the plaintext, whose hash is the address, and
+/// its AEAD tag already rejects corrupt ciphertext underneath). It must **not**
+/// wrap a `put_keyed`-addressed inner store (raw ciphertext, or a pack index),
+/// where the address is deliberately not `Hash::of(value)`.
+///
+/// Recommended always-on for remote backends (S3 can bit-rot); opt-in for local,
+/// where re-hashing every read trades a little CPU for the same guarantee.
+pub struct VerifyingStore {
+    inner: Arc<dyn ContentStore>,
+}
+
+impl VerifyingStore {
+    pub fn new(inner: Arc<dyn ContentStore>) -> Self {
+        Self { inner }
+    }
+}
+
+/// Check that `bytes` hash to `expect`; otherwise the object is corrupt.
+fn verify_integrity(expect: &Hash, bytes: &[u8]) -> Result<()> {
+    let actual = Hash::of(bytes);
+    if &actual == expect {
+        Ok(())
+    } else {
+        Err(AfsError::Corrupt(format!(
+            "content {} failed its integrity check (got {})",
+            expect.to_hex(),
+            actual.to_hex()
+        )))
+    }
+}
+
+#[async_trait]
+impl ContentStore for VerifyingStore {
+    async fn put(&self, bytes: &[u8]) -> Result<Hash> {
+        self.inner.put(bytes).await
+    }
+
+    async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        self.inner.put_keyed(key, bytes).await
+    }
+
+    async fn get(&self, hash: &Hash) -> Result<Bytes> {
+        let bytes = self.inner.get(hash).await?;
+        verify_integrity(hash, &bytes)?;
+        Ok(bytes)
+    }
+
+    async fn get_range(&self, hash: &Hash, off: u64, len: u64) -> Result<Bytes> {
+        // A partial slice can't be verified against the whole-object hash, so
+        // fetch and verify the whole object (afs objects are chunk-sized), then
+        // slice. This keeps ranged reads honest at the cost of pulling the whole
+        // chunk — the same tradeoff EncryptedStore already makes.
+        let full = self.get(hash).await?;
+        let start = (off as usize).min(full.len());
+        let end = start.saturating_add(len as usize).min(full.len());
+        Ok(full.slice(start..end))
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool> {
+        self.inner.has(hash).await
+    }
+
+    async fn list(&self) -> Result<Vec<Hash>> {
+        self.inner.list().await
+    }
+
+    async fn delete(&self, hash: &Hash) -> Result<u64> {
+        self.inner.delete(hash).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
+
+    async fn repack(&self) -> Result<u64> {
+        self.inner.repack().await
+    }
+}

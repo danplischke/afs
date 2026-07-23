@@ -18,6 +18,11 @@ pub trait MetadataStore: Send + Sync {
     /// Create the schema (idempotent) and ensure the root directory (`INO_ROOT`).
     async fn init(&self) -> Result<()>;
 
+    /// The highest migration version currently applied to this store (0 if it has
+    /// never been initialized). Compare with [`crate::latest_schema_version`] to
+    /// tell whether a `migrate`/`init` would advance the schema.
+    async fn schema_version(&self) -> Result<i64>;
+
     /// Begin an atomic write transaction (`docs/DESIGN.md` §4b).
     ///
     /// A logical filesystem write is several statements — create an inode, link
@@ -224,6 +229,9 @@ pub trait MetaTxn: Send {
 impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     async fn init(&self) -> Result<()> {
         (**self).init().await
+    }
+    async fn schema_version(&self) -> Result<i64> {
+        (**self).schema_version().await
     }
     async fn begin(&self) -> Result<Box<dyn MetaTxn>> {
         (**self).begin().await

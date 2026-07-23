@@ -30,6 +30,7 @@ use pyo3::exceptions::{
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use pyo3_async_runtimes::tokio::future_into_py;
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -52,8 +53,17 @@ fn to_pyerr(e: afs_sdk::AfsError) -> PyErr {
     }
 }
 
+#[cfg(unix)]
 fn io_err(e: std::io::Error) -> PyErr {
     PyOSError::new_err(e.to_string())
+}
+
+/// Error for a mount/serve operation that isn't available off Unix (no FUSE/NFS).
+#[cfg(not(unix))]
+fn unsupported(what: &str) -> PyErr {
+    PyOSError::new_err(format!(
+        "{what} is not available on this platform (Unix/FUSE only); use the HTTP API (afs.fastapi) or embed the SDK"
+    ))
 }
 
 // --- dict builders (kept JSON-serializable) ---------------------------------
@@ -325,13 +335,15 @@ impl S3Config {
 // --- FUSE mount handle ------------------------------------------------------
 
 /// A live FUSE mount. Unmounts when `unmount()` is called or the object is
-/// dropped. Usable as a context manager.
+/// dropped. Usable as a context manager. Unix only (FUSE).
+#[cfg(unix)]
 #[pyclass]
 struct Mount {
     session: Option<fuser::BackgroundSession>,
     mountpoint: String,
 }
 
+#[cfg(unix)]
 #[pymethods]
 impl Mount {
     /// Unmount now (idempotent).
@@ -1033,11 +1045,48 @@ impl Workspace {
         })
     }
 
+    // --- schema / migrations ------------------------------------------------
+
+    /// The metadata DB's schema state as `{current, latest, up_to_date}`. afs
+    /// migrates forward automatically on open; this lets you introspect it.
+    fn schema_version<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let current = ws.schema_version().await.map_err(to_pyerr)?;
+            let latest = ws.latest_schema_version();
+            Python::attach(|py| {
+                let d = PyDict::new(py);
+                d.set_item("current", current)?;
+                d.set_item("latest", latest)?;
+                d.set_item("up_to_date", current >= latest)?;
+                Ok(d.into_any().unbind())
+            })
+        })
+    }
+
+    /// Apply any pending metadata migrations (idempotent — a normal open already
+    /// does this). Returns `{from, to, migrated}`. Forward-only.
+    fn migrate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let (from, to) = ws.migrate().await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                let d = PyDict::new(py);
+                d.set_item("from", from)?;
+                d.set_item("to", to)?;
+                d.set_item("migrated", to > from)?;
+                Ok(d.into_any().unbind())
+            })
+        })
+    }
+
     // --- mounting / serving -------------------------------------------------
 
     /// Mount this workspace as a FUSE filesystem at `mountpoint`, in the
     /// background. Returns a `Mount` handle; unmount by calling `.unmount()`,
     /// exiting its `with` block, or dropping it. Requires FUSE (`/dev/fuse`).
+    /// Unix only.
+    #[cfg(unix)]
     fn mount(&self, py: Python<'_>, mountpoint: String) -> PyResult<Mount> {
         let ws = self.inner.clone();
         let mp = mountpoint.clone();
@@ -1050,10 +1099,18 @@ impl Workspace {
         })
     }
 
+    /// FUSE mounting is not available on this platform (Unix/FUSE only). Use the
+    /// HTTP API (`afs.fastapi`) or embed the SDK directly.
+    #[cfg(not(unix))]
+    fn mount(&self, _mountpoint: String) -> PyResult<()> {
+        Err(unsupported("FUSE mounting"))
+    }
+
     /// Serve this workspace over NFSv3 at `addr` (e.g. `127.0.0.1:11111`). The
     /// returned awaitable runs until cancelled — drive it as a background task
     /// (`task = asyncio.create_task(ws.serve_nfs(addr))`) and `task.cancel()`
-    /// to stop.
+    /// to stop. Unix only.
+    #[cfg(unix)]
     fn serve_nfs<'py>(&self, py: Python<'py>, addr: String) -> PyResult<Bound<'py, PyAny>> {
         let ws = self.inner.clone();
         future_into_py(py, async move {
@@ -1061,12 +1118,27 @@ impl Workspace {
             Ok(())
         })
     }
+
+    /// NFS serving is not available on this platform (Unix only). Use the HTTP
+    /// API (`afs.fastapi`) or embed the SDK directly.
+    #[cfg(not(unix))]
+    fn serve_nfs(&self, _addr: String) -> PyResult<()> {
+        Err(unsupported("NFS serving"))
+    }
 }
 
 /// Whether a FUSE mount is possible here (`/dev/fuse` present and usable).
+/// Always `false` off Unix (no FUSE).
+#[cfg(unix)]
 #[pyfunction]
 fn fuse_mountable() -> bool {
     afs_fuse::mountable()
+}
+
+#[cfg(not(unix))]
+#[pyfunction]
+fn fuse_mountable() -> bool {
+    false
 }
 
 /// The compiled extension is imported as `afs._afs`; the pure-Python package
@@ -1078,6 +1150,7 @@ fn _afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WriteCtx>()?;
     m.add_class::<S3Config>()?;
     m.add_class::<Subscription>()?;
+    #[cfg(unix)]
     m.add_class::<Mount>()?;
     m.add_function(wrap_pyfunction!(fuse_mountable, m)?)?;
     m.add("AfsError", m.py().get_type::<AfsError>())?;

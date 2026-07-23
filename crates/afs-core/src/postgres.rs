@@ -323,6 +323,19 @@ impl MetadataStore for PostgresMetadataStore {
         Ok(())
     }
 
+    async fn schema_version(&self) -> Result<i64> {
+        let c = self.client().await?;
+        match c
+            .query_one("SELECT COALESCE(MAX(version), 0) FROM schema_meta", &[])
+            .await
+        {
+            Ok(row) => Ok(row.get::<_, i64>(0)),
+            // A store that was never initialized has no schema_meta table yet.
+            Err(e) if e.to_string().contains("does not exist") => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn begin(&self) -> Result<Box<dyn MetaTxn>> {
         // Pin one pooled connection for the whole `BEGIN … COMMIT`. All the
         // transaction's statements run on this same connection; it returns to

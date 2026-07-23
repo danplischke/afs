@@ -1,313 +1,355 @@
 # afs
 
-An **agent-and-human filesystem**: content-addressed storage (with object-storage
-and large-file support), a pluggable metadata database (Postgres or SQLite),
-opt-in Git-style versioning that interoperates with the real `git`, and
-per-actor edit attribution so a shared human+agent workspace always knows *who*
-edited *what*.
+**A filesystem where humans and AI agents share the same files — and you always
+know who changed what.**
 
-Inspired by [`tursodatabase/agentfs`](https://github.com/tursodatabase/agentfs);
-the full design and rationale live in [`docs/DESIGN.md`](docs/DESIGN.md), and the
-milestone roadmap is tracked in [issue #11](https://github.com/danplischke/afs/issues/11).
+afs is content-addressed storage with a real metadata database (Postgres or
+SQLite), opt-in Git-style versioning, and per-actor attribution built in. Point
+your agents at it and let them work: every edit is recorded against the actor
+that made it, an agent's whole session can be reverted in one call, and the bytes
+you read back are cryptographically guaranteed to be the bytes that were written.
 
-## Status
+```bash
+# an agent works in a fast native mount; its edits stream into afs, attributed
+afs --workspace ./ws overlay --actor "$AGENT" -- claude -p "refactor the parser"
 
-Early — building milestone by milestone. **M0 (skeleton) is implemented:** the
-two core abstractions, a SQLite metadata backend, a local content-addressed blob
-store, the working-tree engine, an SDK, and a CLI.
-
-| Milestone | What it adds | State |
-|---|---|---|
-| **M0** | Core traits + SQLite metadata + local CAS + engine + SDK + CLI | ✅ done |
-| **M1** | Content addressing (BLAKE3 + FastCDC), large files, S3 backend, cache tier | ✅ done |
-| **M2** | Postgres metadata backend (multi-writer), dual-dialect migrations | ✅ done |
-| **M3** | Opt-in versioning: commit DAG, branches, checkout, log, status | ✅ done |
-| **M4** | Three-way merge (diff3 text, chunk-granular binary), conflicts, locks | ✅ done |
-| **M5** | Real-`git` interop: export/import genuine git objects (SHA-1 + SHA-256), git-LFS pointer bridge | ✅ done |
-| **M6** | Per-actor attribution + blame (human vs agent), edit-op audit, revert | ✅ done |
-| **Sandbox** | Isolated overlayfs CoW runs, imported back as attributed changes | ✅ done |
-| **FUSE** | Mount the workspace as a POSIX filesystem (real read/write mount) | ✅ done |
-| **MCP** | Serve the workspace to agents over MCP (JSON-RPC/stdio); writes attributed | ✅ done |
-| **M9 · GC** | Mark-and-sweep garbage collection: reclaim content no ref or live file references | ✅ done |
-| **M9 · Import** | Import a `tursodatabase/agentfs` SQLite DB (tree + audit) with agent attribution | ✅ done |
-| **M9 · Encrypt** | Encryption at rest (XChaCha20-Poly1305), dedup-preserving, transparent to the engine | ✅ done |
-| **M9 · Bench** | Criterion benchmarks over the chunk/write/read/commit hot paths + encryption overhead | ✅ done |
-| **M5 · Remote** | `git-remote-afs` helper: real `git clone` / `fetch` / `push` over `afs://` | ✅ done |
-| **M8** | Live collaboration: change feed + presence, Postgres `LISTEN/NOTIFY` push | ✅ done |
-| **M7 · API** | HTTP/JSON surface: files, versioning, blame, change feed, presence | ✅ done |
-| **Pack layer** | Batch chunks into large pack objects for object storage; ranged reads + repack | ✅ done |
-| **NFS** | Serve the workspace over NFSv3 (`nfsserve`), mountable by any NFS client | ✅ done |
-| **Live feed** | Blocking Postgres `LISTEN/NOTIFY` push subscription; branch-scoped change feed | ✅ done |
-| **Diff** | Two-branch comparison by content address; per-file unified line diff (SDK/HTTP/CLI) | ✅ done |
-| **Suggestions** | Agent edits proposed for human review — accept (attributed) / reject, stale-base guard | ✅ done |
-| **Python** | Async-native PyO3 bindings: FastAPI-ready workspace ops, attribution, suggestions, mount/NFS | ✅ done |
-| Optional | Packed-object git import | ⬜ |
-
-## Layout
-
+# afterwards, see exactly which lines the agent wrote
+afs --workspace ./ws blame /src/parser.rs
 ```
-crates/
-  afs-core/     # MetadataStore + ContentStore traits, SQLite/Postgres + CAS/S3 impls, the Fs engine
-  afs-sdk/      # ergonomic Workspace façade
-  afs-cli/      # `afs` command-line tool
-  afs-sandbox/  # overlayfs copy-on-write sandbox runs, imported as attributed changes
-  afs-fuse/     # mount the workspace as a POSIX filesystem via FUSE
-  afs-mcp/      # serve the workspace to agents over the Model Context Protocol
-  afs-nfs/      # serve the workspace over NFSv3 (mountable by any NFS client)
-  afs-py/       # async-native Python bindings (PyO3) — FastAPI, attribution, mounting
-  afs-git/      # export/import genuine git objects — drive afs with the real `git`
-  afs-remote-git/ # `git-remote-afs` helper: clone/fetch/push over afs:// URLs
-  afs-agentfs/  # import a tursodatabase/agentfs SQLite database into a workspace
-  afs-api/      # HTTP/JSON server over the workspace (axum)
-docs/DESIGN.md
+
+Don't like the result? One SDK call undoes everything that agent did in a
+session — across every file it touched — and leaves human edits untouched.
+
+---
+
+## Why afs
+
+When people and AI agents edit the same workspace, a plain filesystem stops being
+enough. You need to answer questions a directory of files can't:
+
+- **Who wrote this line — a person or an agent?** Every attributed write records
+  the actor, session, and tool-call behind it. `afs blame` reports it per line;
+  the record survives commits, branch switches, and reformatting.
+- **Can I undo just the agent's work?** Revert an agent's entire session across
+  every file it touched, keeping everyone else's edits intact.
+- **Can I review before it lands?** Agents can *propose* edits into a review
+  queue instead of applying them; a human accepts (credited to the agent) or
+  rejects.
+- **Will it hold up for a team?** The Postgres backend is built for many
+  concurrent writers — humans and agents — sharing one workspace, with a live
+  change feed and presence so every client sees edits as they happen.
+- **Can I trust what I read back?** Content is BLAKE3-addressed and verified on
+  every read: silent bit-rot or tampering in object storage surfaces as an error
+  instead of being served as if it were real.
+
+afs isn't a wrapper over `git` or a VFS shim — it's a storage engine with these
+properties at its core, exposed through a CLI, a Rust SDK, Python bindings, an
+HTTP API, and real filesystem mounts (FUSE/NFS).
+
+## Install
+
+afs is a Rust workspace. Build the `afs` CLI with a recent stable toolchain:
+
+```bash
+cargo install --path crates/afs-cli     # installs the `afs` binary
+# or, without installing:
+cargo build --release                    # ./target/release/afs
 ```
+
+A workspace is just a directory afs manages (metadata DB + content store). For a
+team deployment, point it at Postgres and object storage instead — see
+[Running for a team](#running-for-a-team) and [Storage backends](#storage-backends).
 
 ## Quickstart
 
 ```bash
-cargo build
 WS=./ws
-target/debug/afs --workspace "$WS" init
-echo 'hello from afs' | target/debug/afs --workspace "$WS" write /notes/a.txt
-target/debug/afs --workspace "$WS" ls   /notes
-target/debug/afs --workspace "$WS" read /notes/a.txt
-target/debug/afs --workspace "$WS" stat /notes/a.txt
+afs --workspace "$WS" init
+echo 'hello from afs' | afs --workspace "$WS" write /notes/a.txt
+afs --workspace "$WS" ls   /notes
+afs --workspace "$WS" read /notes/a.txt
+afs --workspace "$WS" stat /notes/a.txt
 ```
 
-Or from Rust:
+From Rust:
 
 ```rust
 use afs_sdk::Workspace;
 
-let ws = Workspace::open_local("meta.db", "cas").await?;
+let ws = Workspace::open_local("meta.db", "cas").await?;   // or open_pg(dsn, cas)
 ws.mkdir_p("/notes").await?;
 ws.write("/notes/a.txt", b"hello").await?;
 let bytes = ws.read("/notes/a.txt").await?;
 ```
 
-### Git interop (opt-in)
+## Working with agents
 
-afs stays BLAKE3-native internally, but its commit history can be projected to —
-and imported from — genuine git objects, so you can keep using the real `git`
-CLI and hosts like GitHub:
+### A native mount agents edit in place
+
+The fastest way to put an agent to work is a **live overlay mount**. afs sets up
+an unprivileged kernel overlay over the workspace, runs your agent inside it, and
+streams the agent's changes back into afs — *attributed, as they happen*, not
+only when the process exits:
 
 ```bash
-# afs history -> a real git repo the `git` binary reads directly
-afs --workspace "$WS" commit -m "initial" --author "Dan <dan@example.com>"
-afs --workspace "$WS" git export ./repo --format sha256   # or sha1 for GitHub
-git -C ./repo log --oneline        # real git, reading afs-produced objects
-git -C ./repo fsck --strict        # clean
+afs --workspace "$WS" overlay --actor "$AGENT" --sync-ms 500 -- \
+    some-agent --do-the-thing
+```
 
-# a real git repo -> afs history
+The agent sees an ordinary directory and reads/writes at native speed; afs
+captures each change (create, modify, delete) into the content store and records
+it against `--actor`. When it finishes, `afs blame` and the change feed already
+reflect everything it did. This is how agents are meant to interact with afs day
+to day.
+
+Prefer a protocol integration? afs also speaks **MCP** (Model Context Protocol)
+over stdio, so an agent can call filesystem tools directly — and every write is
+attributed to the agent:
+
+```bash
+afs --workspace "$WS" mcp --agent-name claude --model claude-opus-4-8
+```
+
+### Propose-and-review, not just apply
+
+An agent can submit an edit for human review instead of applying it. The proposed
+bytes go straight into the content store (deduplicated, diffable); the working
+tree doesn't change until someone accepts:
+
+```bash
+echo "patched" | afs --workspace "$WS" suggest /main.rs --actor "$AGENT" --summary "fix bug"
+afs --workspace "$WS" suggestions --status pending
+afs --workspace "$WS" suggestion-diff 1              # base → proposed, unified diff
+afs --workspace "$WS" accept 1 --actor "$HUMAN"      # applies it, credited to the agent
+```
+
+`accept` lands the edit **attributed to the authoring agent** (so blame stays
+honest) and records the approver; it refuses if the file moved since the proposal
+(a stale base). `reject` discards it.
+
+## Know who did what
+
+Every attributed write (`write_as`) records an append-only edit-op — actor,
+session, tool-call, before/after content — and updates a per-line authorship map.
+`afs blame` then reports, per line range, whether a **human** or an **agent** wrote
+it:
+
+```bash
+afs --workspace "$WS" blame /src/parser.rs
+#    1-40   human:dan
+#   41-58   agent:claude
+#   59-72   human:dan
+```
+
+Blame is keyed by **content**, so it stays correct where naïve line-tracking
+breaks: it survives commits and branch checkouts (the map travels with the bytes,
+never desyncing from the file), a re-indent or a moved block keeps its original
+author rather than being credited to whoever reformatted, and content produced
+outside the attributed path simply blames to nothing instead of showing stale
+authorship.
+
+Undo an agent's work without touching anyone else's — `revert_session` walks
+every file the agent touched in that session and removes exactly the lines it
+authored, leaving surrounding human edits in place:
+
+```rust
+let files_changed = ws.revert_session(agent_id, session_id).await?;
+```
+
+## Versioning
+
+Versioning is opt-in and Git-shaped — a real commit DAG, branches, checkout, log,
+status, three-way merge, and locks — but backed by afs's content-addressed store,
+so snapshots are incremental (only changed chunks are stored) and identical trees
+are shared across commits for free.
+
+```bash
+afs --workspace "$WS" commit -m "initial" --author "Dan <dan@example.com>"
+afs --workspace "$WS" branch feature
+afs --workspace "$WS" checkout feature
+afs --workspace "$WS" diff main feature                # changed-path list
+afs --workspace "$WS" diff main feature --path /x.rs   # one file's line diff
+```
+
+Branch comparison works on content addresses, not file reads: equal hashes mean
+an identical file (a 32-byte compare), so a diff only ever reads the paths that
+actually changed — the metadata trees *are* the index.
+
+### Real-`git` interop
+
+afs stays BLAKE3-native internally, but its history projects to — and imports
+from — genuine git objects, so you can keep using the `git` CLI and hosts like
+GitHub:
+
+```bash
+# afs history → a real git repo the `git` binary reads directly
+afs --workspace "$WS" git export ./repo --format sha256   # or sha1 for GitHub
+git -C ./repo log --oneline
+git -C ./repo fsck --strict                                # clean
+
+# a real git repo → afs history
 afs --workspace "$WS2" git import ./repo --branch main
 ```
 
+With `git-remote-afs` on your `PATH`, the real `git` can even clone, fetch, and
+push an afs workspace over `afs://` URLs — no export step:
+
+```bash
+git clone afs://"$WS" checkout
+cd checkout && echo hi >> readme.md && git commit -am edit && git push origin main
+```
+
 Large files can be exported as git-LFS pointer blobs (`--lfs-threshold <bytes>`),
-backed by afs's content-addressed chunk store.
+backed by afs's chunk store.
 
-### Packing for object storage
+## Running for a team
 
-Content-defined chunking makes edits cheap (only changed chunks re-upload) but
-produces *many small objects* — and S3/R2/GCS bill per request. A **pack layer**
-batches chunks into large pack objects (few big PUTs instead of thousands of tiny
-ones) and keeps a small per-chunk index — `(pack, offset, len)` — so a read is a
-single ranged GET into a pack. Deploy the index on a fast local tier and the
-packs on object storage:
+For a shared human+agent workspace, run afs on **Postgres** — the backend built
+for many concurrent writers. Atomic-create is serialized so racing writers never
+leave orphaned inodes, and the whole write path is transactional: content is made
+durable first, then metadata, blame, and the audit log commit together, so a
+crash can never leave a half-recorded edit.
 
 ```rust
-let ws = Workspace::open_s3_packed("meta.db", s3cfg, "index").await?;
-ws.write("/big.bin", &bytes).await?;
-ws.commit("me", "snapshot").await?;   // seals the open pack (also: ws.flush())
-let reclaimed = ws.repack().await?;   // rewrite packs to drop deleted chunks
+let ws = Workspace::open_pg("host=db port=5432 user=afs dbname=afs", content).await?;
 ```
-
-Content addressing is preserved (a chunk's address is still its BLAKE3 hash), so
-metadata, versioning, dedup, and GC are unchanged. `Workspace::open_local_packed`
-packs onto local disk for testing.
-
-Or go over the wire: with `git-remote-afs` on `PATH`, the real `git` clones,
-fetches, and pushes an afs workspace through `afs://` URLs — no export step:
-
-```bash
-git clone afs://"$WS" checkout      # clone an afs workspace with real git
-cd checkout && echo hi >> readme.md && git commit -am edit
-git push origin main                # the push lands back in the afs workspace
-```
-
-### Reclaiming space
-
-Content is addressed and never overwritten, so churn (overwrites, deleted files,
-abandoned branches) leaves orphaned chunks behind. Garbage collection is a
-mark-and-sweep from the refs and the live working tree:
-
-```bash
-afs --workspace "$WS" gc     # kept N object(s), deleted M (… bytes freed)
-```
-
-Run it when the workspace is idle — it is not safe to run concurrently with
-writers.
 
 ### Live collaboration
 
-In a shared human+agent workspace, every operation lands on an append-only
-**change feed** (who touched what, who committed), and each session heartbeats
-its **presence** (which actor, which path). Tail the feed by cursor, or — on the
-Postgres backend — let `LISTEN/NOTIFY` push new events so consumers never poll:
+Every operation lands on an append-only **change feed** (who touched what, who
+committed), and each session heartbeats its **presence** (which actor, which
+path). Tail the feed by cursor, or — on Postgres — let `LISTEN/NOTIFY` push new
+events so clients never poll:
 
 ```bash
 afs --workspace "$WS" watch --follow    # live feed: seq  kind  actor  path
 afs --workspace "$WS" presence          # who's active right now
 ```
 
-From Rust: `Workspace::watch(cursor)`, `Workspace::presence(window_secs)`, and
-`Workspace::touch(actor, session, path)` for heartbeats. On Postgres,
-`PostgresMetadataStore::subscribe(after_seq, branch)` returns a blocking
-`LISTEN`-backed [`EventSubscription`] whose `recv()` wakes on every committed
-change and yields the new events in order — a real push, not a poll. Each event
-is **branch-scoped**, so a UI showing `main` can filter the feed to one branch
-(`subscribe(seq, Some("feature"))`, or `GET /events?branch=feature`).
-
-### Comparing branches
-
-To show one branch against another — the core of a review UI — compare the two
-commits by **content address**, not by reading files. Each commit's tree is a
-`path → content-hash` map; equal hashes mean an identical file (a 32-byte
-compare, no chunk reads), so only the paths that actually differ ever get read:
-
-```bash
-afs --workspace "$WS" diff main feature                # changed-path list
-afs --workspace "$WS" diff main feature --path /x.rs   # one file's line diff
-```
-
-From Rust: `Workspace::diff(from, to)` returns the Added/Modified/Deleted paths;
-`Workspace::diff_file(from, to, path)` returns a unified line diff (empty when
-unchanged). Over HTTP: `GET /diff?from=main&to=feature` and
-`GET /diff/file?from=…&to=…&path=…`. `from`/`to` accept a branch name, `HEAD`,
-or a raw commit hash. This is why "arbitrary chunks in storage" don't make
-comparison expensive: the metadata trees are the index, and content addressing
-makes *unchanged* free.
-
-### Agent suggestions
-
-An agent can *propose* an edit instead of applying it — a review queue for
-human+agent workspaces. The proposed bytes go straight into the content store
-(dedup'd, diffable), and only a small review record is added; the working tree
-doesn't change until a human accepts:
-
-```bash
-echo "patched" | afs --workspace "$WS" suggest /main.rs --actor "$AGENT" --summary "fix bug"
-afs --workspace "$WS" suggestions --status pending
-afs --workspace "$WS" suggestion-diff 1          # base → proposed, as a unified diff
-afs --workspace "$WS" accept 1 --actor "$HUMAN"  # applies it, credited to the agent
-```
-
-`accept` applies the edit **attributed to the authoring agent** (so blame is
-honest) and records the approver; it refuses with a conflict if the file moved
-since the proposal (a stale base). `reject` discards it. From Rust:
-`Workspace::suggest / suggest_delete / list_suggestions / suggestion_diff /
-accept_suggestion / reject_suggestion`. Over HTTP: `POST /suggestions`,
-`GET /suggestions`, `GET /suggestions/{id}/diff`, `POST /suggestions/{id}/accept`.
-It reuses the CAS, the diff engine, the change feed (a `suggest` event), and
-attribution — no new subsystems.
-
-### Python (FastAPI)
-
-Async-native bindings (`afs-py`, built with PyO3) let you drive a workspace from
-Python and write your own endpoints — resolving identity yourself and injecting
-the user/agent behind each write. Every I/O method is awaitable, so it composes
-with FastAPI's `async def`; structured results are plain dicts (JSON-ready):
-
-```python
-import afs
-ws = await afs.Workspace.open_local("meta.db", "cas")   # or open_pg(dsn, cas)
-ctx = afs.WriteCtx.session(actor_id, session_id)         # your resolved identity
-await ws.write_as(ctx, "/notes.txt", b"hello")           # attributed -> blame + audit
-sid = await ws.suggest(ctx, "/x", b"proposed")           # agent proposes for review
-mount = ws.mount("/mnt/afs")                             # orchestrate FUSE from Python
-```
-
-Build with `maturin develop`; see `crates/afs-py/` (`examples/fastapi_app.py`).
+The feed is **exactly-once and in commit order** even under concurrent writers,
+and every event is **branch-scoped**, so a UI showing `main` filters to one
+branch. From Rust, `PostgresMetadataStore::subscribe(after_seq, branch)` returns
+a blocking `LISTEN`-backed subscription whose `recv()` wakes on every committed
+change — a real push, not a poll.
 
 ### HTTP API
 
-The same operations are available over HTTP/JSON — files as raw bytes, everything
-else as JSON — so any client can drive a workspace. Writes go through the SDK, so
-they land on the change feed and carry attribution just like every other surface.
+Every operation is available over HTTP/JSON — files as raw bytes, everything else
+as JSON — so any client or service can drive a workspace. Writes go through the
+same path as every other surface, so they land on the change feed and carry
+attribution:
 
 ```bash
 afs --workspace "$WS" serve --addr 127.0.0.1:8080 &
 curl -X PUT --data-binary 'hello' http://127.0.0.1:8080/files/notes/a.txt
-curl http://127.0.0.1:8080/files/notes/a.txt          # -> hello
+curl 'http://127.0.0.1:8080/files/notes/a.txt'                   # → hello
 curl -X POST -d '{"author":"dan","message":"first"}' http://127.0.0.1:8080/commit
-curl http://127.0.0.1:8080/log
-curl 'http://127.0.0.1:8080/events?since=0'            # the change feed
+curl 'http://127.0.0.1:8080/events?since=0'                      # the change feed
 ```
 
-Routes: `GET/PUT/DELETE /files/*`, `GET/POST /dirs/*`, `GET /stat/*`,
-`GET /blame/*`, `POST /rename`, `POST /commit`, `GET /log`,
-`GET/POST /branches`, `POST /checkout`, `GET /events`, `GET /presence`,
-`POST /actors`, `POST /sessions`. An attributed write is
-`PUT /files/x?actor=<id>&session=<id>`.
+An attributed write is `PUT /files/x?actor=<id>&session=<id>`. Full routes cover
+files, dirs, stat, blame, rename, commit/log, branches/checkout, events,
+presence, actors, sessions, diff, and suggestions.
 
-### NFS
+## Built to not lose or corrupt data
 
-The workspace can also be served over **NFSv3** and mounted by any NFS client —
-the adapter maps onto the same inode-oriented operations the FUSE mount uses:
+Because agents can generate a lot of churn against shared storage, correctness
+under failure is a first-class concern:
+
+- **Corruption never passes as real.** Content is BLAKE3-addressed and re-hashed
+  on read against the address it was fetched by. A flipped bit, a truncated
+  object, or tampering in object storage surfaces as a precise error — down to the
+  offending chunk — instead of being handed back as authentic. Compaction
+  re-verifies every surviving chunk before dropping the old copy.
+- **Writes are atomic and durable.** Content is flushed before the metadata that
+  references it commits, and an edit's inode, content, blame, and audit entry all
+  land in one transaction — or none of them do.
+- **Blame can't lie.** Authorship is tied to content, so it can never drift out
+  of sync with the file it annotates (see [Know who did what](#know-who-did-what)).
+
+## Storage backends
+
+Content addressing means a chunk's identity is its BLAKE3 hash, so dedup,
+versioning, and integrity hold no matter where bytes live.
+
+- **Local** — a sharded content-addressed directory. `Workspace::open_local`.
+- **Object storage (S3/R2/GCS)** — `Workspace::open_s3`. Content-defined chunking
+  keeps edits cheap (only changed chunks re-upload), and a **pack layer**
+  (`open_s3_packed`) batches chunks into large pack objects so you make a few big
+  PUTs instead of thousands of tiny ones, with a small local index for single
+  ranged-GET reads. `repack()` reclaims space from deleted chunks.
+- **Encryption at rest** — wrap any backend so content is encrypted
+  (XChaCha20-Poly1305) before it touches disk or the network, transparently to
+  the engine. The address stays the plaintext hash, so **dedup still works**
+  (convergent encryption). Set `AFS_ENCRYPTION_KEY` or use
+  `Workspace::open_local_encrypted`.
+
+Content is addressed and never overwritten, so churn leaves orphaned chunks
+behind; mark-and-sweep garbage collection reclaims them:
 
 ```bash
-afs --workspace "$WS" nfs --addr 127.0.0.1:11111 &
-mount -t nfs -o vers=3,tcp,port=11111,mountport=11111,nolock 127.0.0.1:/ /mnt
+afs --workspace "$WS" gc     # run when idle — not safe alongside active writers
 ```
 
-### Coming from agentfs
+## Interfaces
 
-An existing [`tursodatabase/agentfs`](https://github.com/tursodatabase/agentfs)
-database imports directly — its files, directories, and symlinks become an afs
-working tree, and its `tool_calls` audit log folds into afs's own audit. By
-default the imported tree is attributed to a synthetic `agentfs` agent actor, so
-`afs blame` shows it as agent-authored:
+| Surface | Use it for |
+|---|---|
+| **`afs` CLI** | Scripting and day-to-day workspace operations |
+| **Rust SDK** (`afs-sdk`) | Embedding afs in a Rust service |
+| **Python** (`afs-py`) | Async-native PyO3 bindings — FastAPI-ready, resolve identity yourself |
+| **HTTP API** (`afs-api`) | Any language / any client over JSON |
+| **MCP** (`afs-mcp`) | Agents calling filesystem tools directly, attributed |
+| **Overlay mount** | Running an agent live in a fast native mount |
+| **FUSE / NFS** | Mounting the workspace as a POSIX filesystem |
 
-```bash
-afs --workspace "$WS" import-agentfs ./agent.db
-afs --workspace "$WS" blame /some/file     # agent:agentfs
+Python, for example, keeps every I/O method awaitable so it composes with
+FastAPI, and lets you inject the user/agent behind each write:
+
+```python
+import afs
+ws  = await afs.Workspace.open_local("meta.db", "cas")   # or open_pg(dsn, cas)
+ctx = afs.WriteCtx.session(actor_id, session_id)          # your resolved identity
+await ws.write_as(ctx, "/notes.txt", b"hello")            # attributed → blame + audit
 ```
-
-### Encryption at rest
-
-Content can be encrypted before it ever touches disk or object storage
-(XChaCha20-Poly1305), transparently to the engine — the address stays the
-plaintext hash, so metadata, versioning, and GC are unchanged, and **dedup still
-works** (convergent encryption). Opt in by setting `AFS_ENCRYPTION_KEY`:
-
-```bash
-export AFS_ENCRYPTION_KEY="correct horse battery staple"
-echo 'secret' | afs --workspace "$WS" write /notes.txt   # ciphertext on disk
-afs --workspace "$WS" read /notes.txt                     # plaintext back
-```
-
-The same key must be used every time; the wrong key fails loudly rather than
-returning garbage. From Rust, use `Workspace::open_local_encrypted` or wrap any
-`ContentStore` in an `EncryptedStore`.
 
 ## Development
 
 ```bash
 cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
 
-### Benchmarks
+The Postgres backend tests self-skip unless `AFS_PG_TEST_URL` points at a
+reachable database:
 
-Criterion micro-benchmarks over the hot paths (chunk + BLAKE3 write, whole-file
-read, commit/tree building, and the cost of encryption) run over the in-memory
-store, so they reflect afs's own CPU cost rather than disk or network:
+```bash
+AFS_PG_TEST_URL="host=127.0.0.1 port=5432 user=postgres dbname=afs" cargo test --workspace
+```
+
+### Performance
+
+Criterion micro-benchmarks cover the hot paths (chunk + BLAKE3 write, whole-file
+read, commit/tree building, encryption overhead) over an in-memory store, so they
+reflect afs's own CPU cost rather than disk or network:
 
 ```bash
 cargo bench -p afs-core
 ```
 
-Indicative single-threaded numbers (release build, in-memory store): writes chunk
-+ hash at ~1.3 GiB/s and reads reassemble at ~10 GiB/s; encryption at rest costs
-roughly 2× on write and is decrypt-bound on read.
+Indicative single-threaded numbers (release, in-memory store): writes chunk + hash
+at ~1.3 GiB/s and reads reassemble at ~10 GiB/s; encryption at rest costs roughly
+2× on write and is decrypt-bound on read.
+
+## Design
+
+The full design and rationale — the metadata/content split, the versioning model,
+attribution, and the failure-surface work — live in
+[`docs/DESIGN.md`](docs/DESIGN.md). afs was inspired by
+[`tursodatabase/agentfs`](https://github.com/tursodatabase/agentfs), and an
+existing agentfs SQLite database imports directly
+(`afs import-agentfs ./agent.db`), folding its tree and tool-call audit into afs
+with agent attribution.
 
 ## License
 

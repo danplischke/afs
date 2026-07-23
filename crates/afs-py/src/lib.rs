@@ -19,7 +19,8 @@
 use afs_core::LocalCasStore;
 use afs_sdk::{
     Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, EventSubscription,
-    Inode, Presence, RebuildReport, S3Config as CoreS3Config, Suggestion, SuggestionStatus,
+    GcsConfig as CoreGcsConfig, Inode, Presence, RebuildReport, S3Config as CoreS3Config,
+    Suggestion, SuggestionStatus,
     Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
 };
 use pyo3::create_exception;
@@ -280,9 +281,15 @@ impl Subscription {
 // --- S3 config --------------------------------------------------------------
 
 /// Connection settings for an S3-compatible object store (AWS S3, Cloudflare R2,
-/// GCS S3 API, MinIO). Pass to `Workspace.open_s3` / `open_pg_s3` (and their
-/// `_packed` forms). Credentials fall back to the environment / instance role
-/// when omitted.
+/// MinIO, or GCS via its S3-interop XML API). Pass to `Workspace.open_s3` /
+/// `open_pg_s3` (and their `_packed` forms).
+///
+/// When `access_key_id` / `secret_access_key` are omitted, credentials fall back
+/// to the **AWS** default chain (`AWS_*` env vars, EC2/ECS instance role) — that
+/// is AWS-only and does nothing on GCP. To use GCS over this S3 path, set
+/// `endpoint="https://storage.googleapis.com"` and supply GCS **HMAC** interop
+/// keys. For native GCS auth (service account / ADC / workload identity) use
+/// `GcsConfig` + `Workspace.open_gcs` instead.
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 struct S3Config {
@@ -328,6 +335,60 @@ impl S3Config {
         format!(
             "S3Config(bucket={:?}, region={:?}, endpoint={:?}, prefix={:?})",
             self.inner.bucket, self.inner.region, self.inner.endpoint, self.inner.prefix
+        )
+    }
+}
+
+// --- GCS config -------------------------------------------------------------
+
+/// Connection settings for a **native** Google Cloud Storage object store (GCS
+/// JSON API + OAuth2). Pass to `Workspace.open_gcs` / `open_pg_gcs` (and their
+/// `_packed` forms).
+///
+/// Credentials resolve in order: an explicit `service_account_key` (inline JSON)
+/// or `service_account_path` (file); then Application Default Credentials
+/// (`application_credentials`, else `GOOGLE_APPLICATION_CREDENTIALS` / `gcloud`);
+/// then the GCE/GKE metadata server (workload identity). Unlike `S3Config`, this
+/// needs no HMAC keys and no endpoint override.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct GcsConfig {
+    inner: CoreGcsConfig,
+}
+
+#[pymethods]
+impl GcsConfig {
+    #[new]
+    #[pyo3(signature = (
+        bucket,
+        service_account_path = None,
+        service_account_key = None,
+        application_credentials = None,
+        prefix = None,
+    ))]
+    fn new(
+        bucket: String,
+        service_account_path: Option<String>,
+        service_account_key: Option<String>,
+        application_credentials: Option<String>,
+        prefix: Option<String>,
+    ) -> Self {
+        Self {
+            inner: CoreGcsConfig {
+                bucket,
+                service_account_path,
+                service_account_key,
+                application_credentials,
+                prefix,
+            },
+        }
+    }
+
+    // Deliberately omits credentials.
+    fn __repr__(&self) -> String {
+        format!(
+            "GcsConfig(bucket={:?}, prefix={:?})",
+            self.inner.bucket, self.inner.prefix
         )
     }
 }
@@ -491,6 +552,76 @@ impl Workspace {
     ) -> PyResult<Bound<'py, PyAny>> {
         future_into_py(py, async move {
             let ws = CoreWorkspace::open_pg_s3_packed(&dsn, cfg.inner, &index_dir)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + a **native** GCS object store (GCS JSON API + OAuth2;
+    /// service-account / ADC / workload-identity credentials — see `GcsConfig`).
+    /// Reads are integrity-verified (a bit-rotted object errors instead of being
+    /// served).
+    #[staticmethod]
+    fn open_gcs<'py>(
+        py: Python<'py>,
+        db_path: String,
+        cfg: GcsConfig,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_gcs(&db_path, cfg.inner)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// SQLite metadata + a **packed** native GCS object store with the per-chunk
+    /// index under `index_dir`. Call `commit`/`flush` to seal the open pack and
+    /// `repack` to reclaim space.
+    #[staticmethod]
+    fn open_gcs_packed<'py>(
+        py: Python<'py>,
+        db_path: String,
+        cfg: GcsConfig,
+        index_dir: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_gcs_packed(&db_path, cfg.inner, &index_dir)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// Postgres metadata (multi-writer) + a **native** GCS object store — the
+    /// production pairing for a shared human+agent workspace on Google Cloud.
+    #[staticmethod]
+    fn open_pg_gcs<'py>(
+        py: Python<'py>,
+        dsn: String,
+        cfg: GcsConfig,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_pg_gcs(&dsn, cfg.inner)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| Py::new(py, Workspace { inner: ws }))
+        })
+    }
+
+    /// Postgres metadata + a **packed** native GCS object store with the per-chunk
+    /// index under `index_dir`. The recommended object-storage layout for a team on
+    /// Google Cloud.
+    #[staticmethod]
+    fn open_pg_gcs_packed<'py>(
+        py: Python<'py>,
+        dsn: String,
+        cfg: GcsConfig,
+        index_dir: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
+            let ws = CoreWorkspace::open_pg_gcs_packed(&dsn, cfg.inner, &index_dir)
                 .await
                 .map_err(to_pyerr)?;
             Python::attach(|py| Py::new(py, Workspace { inner: ws }))
@@ -1149,6 +1280,7 @@ fn _afs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Workspace>()?;
     m.add_class::<WriteCtx>()?;
     m.add_class::<S3Config>()?;
+    m.add_class::<GcsConfig>()?;
     m.add_class::<Subscription>()?;
     #[cfg(unix)]
     m.add_class::<Mount>()?;

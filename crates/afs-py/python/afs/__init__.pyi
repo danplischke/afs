@@ -25,7 +25,10 @@ class WriteCtx:
     def session_id(self) -> Optional[int]: ...
 
 class S3Config:
-    """Connection settings for an S3-compatible object store (S3/R2/GCS/MinIO)."""
+    """Connection settings for an S3-compatible object store (S3/R2/MinIO, or GCS
+    via its S3-interop XML API). For GCS, set ``endpoint`` to
+    ``https://storage.googleapis.com`` and pass GCS HMAC interop keys; for native
+    GCS auth use :class:`GcsConfig` instead."""
     def __init__(
         self,
         bucket: str,
@@ -34,6 +37,21 @@ class S3Config:
         allow_http: bool = False,
         access_key_id: Optional[str] = None,
         secret_access_key: Optional[str] = None,
+        prefix: Optional[str] = None,
+    ) -> None: ...
+
+class GcsConfig:
+    """Connection settings for a native Google Cloud Storage object store (GCS JSON
+    API + OAuth2). Credentials resolve as: explicit ``service_account_key`` (inline
+    JSON) or ``service_account_path`` (file); then Application Default Credentials
+    (``application_credentials``, else ``GOOGLE_APPLICATION_CREDENTIALS`` /
+    ``gcloud``); then the GCE/GKE metadata server (workload identity)."""
+    def __init__(
+        self,
+        bucket: str,
+        service_account_path: Optional[str] = None,
+        service_account_key: Optional[str] = None,
+        application_credentials: Optional[str] = None,
         prefix: Optional[str] = None,
     ) -> None: ...
 
@@ -63,6 +81,14 @@ class Workspace:
     async def open_pg_s3(dsn: str, cfg: S3Config) -> "Workspace": ...
     @staticmethod
     async def open_pg_s3_packed(dsn: str, cfg: S3Config, index_dir: str) -> "Workspace": ...
+    @staticmethod
+    async def open_gcs(db_path: str, cfg: GcsConfig) -> "Workspace": ...
+    @staticmethod
+    async def open_gcs_packed(db_path: str, cfg: GcsConfig, index_dir: str) -> "Workspace": ...
+    @staticmethod
+    async def open_pg_gcs(dsn: str, cfg: GcsConfig) -> "Workspace": ...
+    @staticmethod
+    async def open_pg_gcs_packed(dsn: str, cfg: GcsConfig, index_dir: str) -> "Workspace": ...
     @staticmethod
     async def open_object_memory(db_path: str) -> "Workspace": ...
 

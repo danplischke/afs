@@ -47,7 +47,7 @@ pub use objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, RefSnapshot, Tree, TreeEntry, TreeKind,
     VersioningMode,
 };
-pub use objectstore::{ObjectContentStore, S3Config};
+pub use objectstore::{GcsConfig, ObjectContentStore, S3Config};
 pub use pack::{PackStore, DEFAULT_PACK_SIZE};
 pub use postgres::{EventSubscription, PostgresMetadataStore};
 pub use recover::RebuildReport;

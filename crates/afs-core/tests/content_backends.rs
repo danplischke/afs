@@ -86,3 +86,48 @@ async fn s3_backend() {
     };
     suite(ObjectContentStore::s3(cfg).unwrap()).await;
 }
+
+/// The native GCS adapter builds from an inline service-account key without any
+/// network or key-parsing work (`disable_oauth` short-circuits token/PEM setup),
+/// so this validates the `GcsConfig` plumbing offline. A real run is the env-gated
+/// `gcs_backend` below.
+#[tokio::test]
+async fn gcs_store_constructs() {
+    use afs_core::GcsConfig;
+    // Minimal service-account JSON: the fields serde requires, with oauth disabled
+    // so `build()` never parses the (empty) key or fetches a token.
+    let key = r#"{"private_key":"","private_key_id":"","client_email":"","disable_oauth":true}"#;
+    let store = ObjectContentStore::gcs(GcsConfig {
+        bucket: "afs-test-bucket".into(),
+        service_account_key: Some(key.into()),
+        prefix: Some("afs-test".into()),
+        ..Default::default()
+    });
+    assert!(
+        store.is_ok(),
+        "gcs() should build from an inline service-account key"
+    );
+}
+
+/// Real native-GCS run. Set the env vars to enable (against a real bucket or
+/// `fake-gcs-server`):
+///   AFS_GCS_TEST_BUCKET (required),
+///   AFS_GCS_TEST_SERVICE_ACCOUNT_PATH   (JSON key file; for fake-gcs-server, point
+///     its `gcs_base_url` at the emulator and set `disable_oauth: true`),
+///   AFS_GCS_TEST_SERVICE_ACCOUNT_KEY    (inline JSON; alternative to the path),
+///   AFS_GCS_TEST_APPLICATION_CREDENTIALS (ADC file).
+/// With none of the credential vars set, ADC / the metadata server are used.
+#[tokio::test]
+#[ignore = "requires a GCS bucket or emulator; set AFS_GCS_TEST_* to run"]
+async fn gcs_backend() {
+    use afs_core::GcsConfig;
+    let bucket = std::env::var("AFS_GCS_TEST_BUCKET").expect("AFS_GCS_TEST_BUCKET");
+    let cfg = GcsConfig {
+        bucket,
+        service_account_path: std::env::var("AFS_GCS_TEST_SERVICE_ACCOUNT_PATH").ok(),
+        service_account_key: std::env::var("AFS_GCS_TEST_SERVICE_ACCOUNT_KEY").ok(),
+        application_credentials: std::env::var("AFS_GCS_TEST_APPLICATION_CREDENTIALS").ok(),
+        prefix: Some("afs-test".into()),
+    };
+    suite(ObjectContentStore::gcs(cfg).unwrap()).await;
+}

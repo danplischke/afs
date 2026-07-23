@@ -18,8 +18,8 @@
 use afs_sdk::{AfsError, DirEntry, FileKind, Inode, Workspace};
 use async_trait::async_trait;
 use nfsserve::nfs::{
-    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfsstring, nfstime3, sattr3,
-    set_mode3, set_size3, specdata3,
+    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfsstring, nfstime3, sattr3, set_mode3,
+    set_size3, specdata3,
 };
 use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use nfsserve::vfs::{DirEntry as NfsDirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
@@ -117,24 +117,38 @@ impl NFSFileSystem for AfsNfs {
     }
 
     async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
-        match self.ws.fs().vfs_lookup(dirid as i64, name(filename)?).await.map_err(stat)? {
+        match self
+            .ws
+            .fs()
+            .vfs_lookup(dirid as i64, name(filename)?)
+            .await
+            .map_err(stat)?
+        {
             Some(inode) => Ok(inode.ino as fileid3),
             None => Err(nfsstat3::NFS3ERR_NOENT),
         }
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
-        Ok(attr(&self.ws.fs().vfs_getattr(id as i64).await.map_err(stat)?))
+        Ok(attr(
+            &self.ws.fs().vfs_getattr(id as i64).await.map_err(stat)?,
+        ))
     }
 
     async fn setattr(&self, id: fileid3, setattr: sattr3) -> Result<fattr3, nfsstat3> {
         if let set_size3::size(sz) = setattr.size {
-            self.ws.fs().vfs_truncate(id as i64, sz).await.map_err(stat)?;
+            self.ws
+                .fs()
+                .vfs_truncate(id as i64, sz)
+                .await
+                .map_err(stat)?;
         }
         // afs's minimal inode set doesn't persist uid/gid/atime/mtime; mode
         // changes aren't yet surfaced by vfs_*, so those set-attrs are accepted
         // but no-op. Size (truncate) is the one that matters for NFS clients.
-        Ok(attr(&self.ws.fs().vfs_getattr(id as i64).await.map_err(stat)?))
+        Ok(attr(
+            &self.ws.fs().vfs_getattr(id as i64).await.map_err(stat)?,
+        ))
     }
 
     async fn read(
@@ -143,15 +157,32 @@ impl NFSFileSystem for AfsNfs {
         offset: u64,
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
-        let size = self.ws.fs().vfs_getattr(id as i64).await.map_err(stat)?.size;
-        let bytes = self.ws.fs().vfs_read(id as i64, offset, count).await.map_err(stat)?;
+        let size = self
+            .ws
+            .fs()
+            .vfs_getattr(id as i64)
+            .await
+            .map_err(stat)?
+            .size;
+        let bytes = self
+            .ws
+            .fs()
+            .vfs_read(id as i64, offset, count)
+            .await
+            .map_err(stat)?;
         let eof = offset.saturating_add(bytes.len() as u64) >= size;
         Ok((bytes.to_vec(), eof))
     }
 
     async fn write(&self, id: fileid3, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
-        self.ws.fs().vfs_write(id as i64, offset, data).await.map_err(stat)?;
-        Ok(attr(&self.ws.fs().vfs_getattr(id as i64).await.map_err(stat)?))
+        self.ws
+            .fs()
+            .vfs_write(id as i64, offset, data)
+            .await
+            .map_err(stat)?;
+        Ok(attr(
+            &self.ws.fs().vfs_getattr(id as i64).await.map_err(stat)?,
+        ))
     }
 
     async fn create(
@@ -164,9 +195,18 @@ impl NFSFileSystem for AfsNfs {
             set_mode3::mode(m) => m,
             _ => 0o644,
         };
-        let inode = self.ws.fs().vfs_create(dirid as i64, name(filename)?, mode).await.map_err(stat)?;
+        let inode = self
+            .ws
+            .fs()
+            .vfs_create(dirid as i64, name(filename)?, mode)
+            .await
+            .map_err(stat)?;
         if let set_size3::size(sz) = attr_in.size {
-            self.ws.fs().vfs_truncate(inode.ino, sz).await.map_err(stat)?;
+            self.ws
+                .fs()
+                .vfs_truncate(inode.ino, sz)
+                .await
+                .map_err(stat)?;
         }
         let inode = self.ws.fs().vfs_getattr(inode.ino).await.map_err(stat)?;
         Ok((inode.ino as fileid3, attr(&inode)))
@@ -177,7 +217,12 @@ impl NFSFileSystem for AfsNfs {
         dirid: fileid3,
         filename: &filename3,
     ) -> Result<fileid3, nfsstat3> {
-        let inode = self.ws.fs().vfs_create(dirid as i64, name(filename)?, 0o644).await.map_err(stat)?;
+        let inode = self
+            .ws
+            .fs()
+            .vfs_create(dirid as i64, name(filename)?, 0o644)
+            .await
+            .map_err(stat)?;
         Ok(inode.ino as fileid3)
     }
 
@@ -186,13 +231,24 @@ impl NFSFileSystem for AfsNfs {
         dirid: fileid3,
         dirname: &filename3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
-        let inode = self.ws.fs().vfs_mkdir(dirid as i64, name(dirname)?, 0o755).await.map_err(stat)?;
+        let inode = self
+            .ws
+            .fs()
+            .vfs_mkdir(dirid as i64, name(dirname)?, 0o755)
+            .await
+            .map_err(stat)?;
         Ok((inode.ino as fileid3, attr(&inode)))
     }
 
     async fn remove(&self, dirid: fileid3, filename: &filename3) -> Result<(), nfsstat3> {
         let n = name(filename)?;
-        match self.ws.fs().vfs_lookup(dirid as i64, n).await.map_err(stat)? {
+        match self
+            .ws
+            .fs()
+            .vfs_lookup(dirid as i64, n)
+            .await
+            .map_err(stat)?
+        {
             Some(inode) if inode.kind == FileKind::Dir => {
                 self.ws.fs().vfs_rmdir(dirid as i64, n).await.map_err(stat)
             }
@@ -208,7 +264,8 @@ impl NFSFileSystem for AfsNfs {
         to_dirid: fileid3,
         to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
-        self.ws.fs()
+        self.ws
+            .fs()
             .vfs_rename(
                 from_dirid as i64,
                 name(from_filename)?,
@@ -225,7 +282,8 @@ impl NFSFileSystem for AfsNfs {
         start_after: fileid3,
         max_entries: usize,
     ) -> Result<ReadDirResult, nfsstat3> {
-        let mut entries: Vec<DirEntry> = self.ws.fs().vfs_readdir(dirid as i64).await.map_err(stat)?;
+        let mut entries: Vec<DirEntry> =
+            self.ws.fs().vfs_readdir(dirid as i64).await.map_err(stat)?;
         entries.sort_by_key(|e| e.ino); // stable order so the cookie is meaningful
 
         let start = if start_after == 0 {
@@ -263,7 +321,12 @@ impl NFSFileSystem for AfsNfs {
         _attr: &sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let target = std::str::from_utf8(&symlink.0).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
-        let inode = self.ws.fs().vfs_symlink(dirid as i64, name(linkname)?, target).await.map_err(stat)?;
+        let inode = self
+            .ws
+            .fs()
+            .vfs_symlink(dirid as i64, name(linkname)?, target)
+            .await
+            .map_err(stat)?;
         Ok((inode.ino as fileid3, attr(&inode)))
     }
 

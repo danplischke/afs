@@ -177,7 +177,10 @@ fn read_heads(dir: &Path) -> HashMap<String, String> {
     if let Ok(entries) = std::fs::read_dir(dir.join(".git/refs/heads")) {
         for e in entries.flatten() {
             if let Ok(oid) = std::fs::read_to_string(e.path()) {
-                out.insert(e.file_name().to_string_lossy().into_owned(), oid.trim().to_string());
+                out.insert(
+                    e.file_name().to_string_lossy().into_owned(),
+                    oid.trim().to_string(),
+                );
             }
         }
     }

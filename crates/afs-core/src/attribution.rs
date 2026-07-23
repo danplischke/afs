@@ -437,7 +437,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             // caller based this write on. On mismatch the whole transaction rolls
             // back (undoing the blame staged just above), so nothing is clobbered.
             Some(expected) => {
-                if !tx.set_content_if(ino, expected.as_ref(), mhash, size).await? {
+                if !tx
+                    .set_content_if(ino, expected.as_ref(), mhash, size)
+                    .await?
+                {
                     return Err(AfsError::Conflict(format!(
                         "{path} changed since the write was based on it"
                     )));

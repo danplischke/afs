@@ -274,7 +274,8 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     pub(crate) async fn replace_working_tree(&self, tree_hash: Hash) -> Result<()> {
         let mut txn = self.meta.begin().await?;
         txn.truncate_tree().await?;
-        self.materialize_into_txn(&mut *txn, tree_hash, INO_ROOT).await?;
+        self.materialize_into_txn(&mut *txn, tree_hash, INO_ROOT)
+            .await?;
         txn.commit().await?;
         Ok(())
     }
@@ -383,7 +384,8 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     async fn flatten_commit(&self, commit_hash: Hash) -> Result<BTreeMap<String, Hash>> {
         let commit = Commit::decode(&self.content.get(&commit_hash).await?)?;
         let mut map = BTreeMap::new();
-        self.flatten_tree(commit.tree, String::new(), &mut map).await?;
+        self.flatten_tree(commit.tree, String::new(), &mut map)
+            .await?;
         Ok(map)
     }
 
@@ -395,7 +397,9 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// 32-byte compare and never touch the chunk store. Only the paths this
     /// returns need a real line diff — see [`Self::diff_file`].
     pub async fn diff(&self, from: &str, to: &str) -> Result<Vec<DiffEntry>> {
-        let base = self.flatten_commit(self.resolve_commit(from).await?).await?;
+        let base = self
+            .flatten_commit(self.resolve_commit(from).await?)
+            .await?;
         let target = self.flatten_commit(self.resolve_commit(to).await?).await?;
         Ok(diff_maps(&base, &target))
     }
@@ -404,7 +408,9 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// empty string when the file is byte-identical (or absent) on both sides.
     /// Binary content is compared lossily as UTF-8.
     pub async fn diff_file(&self, from: &str, to: &str, path: &str) -> Result<String> {
-        let base = self.flatten_commit(self.resolve_commit(from).await?).await?;
+        let base = self
+            .flatten_commit(self.resolve_commit(from).await?)
+            .await?;
         let target = self.flatten_commit(self.resolve_commit(to).await?).await?;
         // Fast path: identical (or both-absent) content addresses — no reads.
         if base.get(path) == target.get(path) {

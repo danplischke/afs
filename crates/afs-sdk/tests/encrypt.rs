@@ -32,7 +32,10 @@ async fn encrypted_workspace_roundtrips_and_persists_a_salt() {
         let ws = Workspace::open_local_encrypted(&db, &cas, "correct horse battery")
             .await
             .unwrap();
-        assert_eq!(&ws.read("/secret.txt").await.unwrap()[..], b"attack at dawn");
+        assert_eq!(
+            &ws.read("/secret.txt").await.unwrap()[..],
+            b"attack at dawn"
+        );
         assert_eq!(std::fs::read(cas.join("keysalt")).unwrap(), salt);
     }
 }

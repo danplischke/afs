@@ -9,11 +9,11 @@
 //! feeds (consumed by the watch API in M8).
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
-use crate::collab::{Event, EventInit, Presence, EVENT_CHANNEL};
-use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
+use crate::collab::{EVENT_CHANNEL, Event, EventInit, Presence};
 use crate::error::{AfsError, Result};
 use crate::metadata::{MetaTxn, MetadataStore};
 use crate::migrations::MIGRATIONS;
+use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::types::{DirEntry, FileKind, Hash, Ino, Inode, InodeInit};
 use crate::util::now_secs;
 use async_trait::async_trait;
@@ -295,7 +295,10 @@ impl MetadataStore for PostgresMetadataStore {
         .await?;
         for m in MIGRATIONS {
             let applied = tx
-                .query_opt("SELECT 1 FROM schema_meta WHERE version = $1", &[&m.version])
+                .query_opt(
+                    "SELECT 1 FROM schema_meta WHERE version = $1",
+                    &[&m.version],
+                )
                 .await?
                 .is_some();
             if !applied {
@@ -1079,7 +1082,10 @@ impl MetaTxn for PostgresTxn {
 
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()> {
         self.conn()
-            .execute("UPDATE inode SET nlink = $1 WHERE ino = $2", &[&nlink, &ino])
+            .execute(
+                "UPDATE inode SET nlink = $1 WHERE ino = $2",
+                &[&nlink, &ino],
+            )
             .await?;
         Ok(())
     }

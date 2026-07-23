@@ -24,7 +24,13 @@ async fn subscribe_pushes_writes_over_postgres() {
         .unwrap();
 
     // Subscribe at the current tail (LISTEN is active once subscribe returns).
-    let cursor = ws.watch(0).await.unwrap().last().map(|e| e.seq).unwrap_or(0);
+    let cursor = ws
+        .watch(0)
+        .await
+        .unwrap()
+        .last()
+        .map(|e| e.seq)
+        .unwrap_or(0);
     let mut sub = ws.subscribe(cursor, None).await.unwrap();
 
     // A write emits a "write" event; the NOTIFY wakes recv().

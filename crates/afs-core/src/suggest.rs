@@ -215,8 +215,8 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
     async fn hex_to_text(&self, hex: Option<&str>) -> Result<String> {
         match hex {
             Some(h) => {
-                let hash =
-                    Hash::from_hex(h).ok_or_else(|| AfsError::Metadata("bad content hash".into()))?;
+                let hash = Hash::from_hex(h)
+                    .ok_or_else(|| AfsError::Metadata("bad content hash".into()))?;
                 let bytes = self.content_bytes(&hash).await?;
                 Ok(String::from_utf8_lossy(&bytes).into_owned())
             }
@@ -292,7 +292,12 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
         }
 
         self.meta
-            .resolve_suggestion(id, SuggestionStatus::Accepted, Some(approver.actor), now_secs())
+            .resolve_suggestion(
+                id,
+                SuggestionStatus::Accepted,
+                Some(approver.actor),
+                now_secs(),
+            )
             .await?;
         self.record_event(EventInit {
             actor_id: Some(approver.actor),
@@ -320,7 +325,12 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
             )));
         }
         self.meta
-            .resolve_suggestion(id, SuggestionStatus::Rejected, Some(approver.actor), now_secs())
+            .resolve_suggestion(
+                id,
+                SuggestionStatus::Rejected,
+                Some(approver.actor),
+                now_secs(),
+            )
             .await?;
         self.record_event(EventInit {
             actor_id: Some(approver.actor),

@@ -670,7 +670,15 @@ impl MetadataStore for SqliteMetadataStore {
         conn.execute(
             "INSERT INTO fs_event(actor_id, session_id, kind, path, detail, ts, branch)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![ev.actor_id, ev.session_id, ev.kind, ev.path, ev.detail, ts, ev.branch],
+            params![
+                ev.actor_id,
+                ev.session_id,
+                ev.kind,
+                ev.path,
+                ev.detail,
+                ts,
+                ev.branch
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -798,10 +806,7 @@ impl MetadataStore for SqliteMetadataStore {
              WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR path = ?2)
              ORDER BY id DESC",
         )?;
-        let rows = stmt.query_map(
-            params![status.map(|s| s.as_str()), path],
-            row_to_suggestion,
-        )?;
+        let rows = stmt.query_map(params![status.map(|s| s.as_str()), path], row_to_suggestion)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);

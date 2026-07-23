@@ -153,8 +153,14 @@ async fn postgres_backend() {
         fs.actor_by_subject("dev@x").await.unwrap().unwrap().id,
         human
     );
-    assert_eq!(fs.find_or_create_human("dev@x", "again").await.unwrap(), human);
-    let other = fs.find_or_create_human("someone-else", "Sam").await.unwrap();
+    assert_eq!(
+        fs.find_or_create_human("dev@x", "again").await.unwrap(),
+        human
+    );
+    let other = fs
+        .find_or_create_human("someone-else", "Sam")
+        .await
+        .unwrap();
     assert_ne!(other, human);
     assert!(fs.actor_by_subject("nobody").await.unwrap().is_none());
     assert_eq!(fs.edit_ops(agent, Some(sess)).await.unwrap().len(), 1);
@@ -169,14 +175,22 @@ async fn postgres_backend() {
         )
         .await
         .unwrap();
-    let pending = fs.list_suggestions(Some(SuggestionStatus::Pending), None).await.unwrap();
+    let pending = fs
+        .list_suggestions(Some(SuggestionStatus::Pending), None)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, sug);
     assert!(fs.suggestion_diff(sug).await.unwrap().contains("+three"));
     // working tree untouched until accept
     assert_eq!(&fs.read("/a/attr.txt").await.unwrap()[..], b"one\ntwo\n");
-    fs.accept_suggestion(sug, afs_core::WriteCtx::actor(human)).await.unwrap();
-    assert_eq!(&fs.read("/a/attr.txt").await.unwrap()[..], b"one\ntwo\nthree\n");
+    fs.accept_suggestion(sug, afs_core::WriteCtx::actor(human))
+        .await
+        .unwrap();
+    assert_eq!(
+        &fs.read("/a/attr.txt").await.unwrap()[..],
+        b"one\ntwo\nthree\n"
+    );
     assert_eq!(
         fs.get_suggestion(sug).await.unwrap().unwrap().status,
         SuggestionStatus::Accepted
@@ -221,7 +235,10 @@ async fn postgres_change_feed_push() {
     // Subscribe from the start; a separate handle appends -> we get pushed.
     let mut sub = meta.subscribe(0, None).await.unwrap();
     let writer = PostgresMetadataStore::connect(&dsn).await.unwrap();
-    writer.append_event(ev("write", "/a", "main"), 100).await.unwrap();
+    writer
+        .append_event(ev("write", "/a", "main"), 100)
+        .await
+        .unwrap();
 
     let batch = recv_batch(&mut sub).await;
     assert_eq!(batch.len(), 1);
@@ -229,25 +246,43 @@ async fn postgres_change_feed_push() {
     assert_eq!(batch[0].branch.as_deref(), Some("main"));
 
     // Two changes before the next recv coalesce into one ordered batch.
-    writer.append_event(ev("write", "/b", "main"), 101).await.unwrap();
-    writer.append_event(ev("mkdir", "/c", "feature"), 102).await.unwrap();
+    writer
+        .append_event(ev("write", "/b", "main"), 101)
+        .await
+        .unwrap();
+    writer
+        .append_event(ev("mkdir", "/c", "feature"), 102)
+        .await
+        .unwrap();
     let batch = recv_batch(&mut sub).await;
     let paths: Vec<&str> = batch.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(paths, vec!["/b", "/c"], "ordered by seq, both delivered");
     drop(sub);
 
     // A branch-filtered subscription only ever sees its own branch.
-    let mut feat = meta.subscribe(0, Some("feature".to_string())).await.unwrap();
+    let mut feat = meta
+        .subscribe(0, Some("feature".to_string()))
+        .await
+        .unwrap();
     let seen = recv_batch(&mut feat).await; // /c already exists on feature
     assert!(seen.iter().all(|e| e.branch.as_deref() == Some("feature")));
     assert!(seen.iter().any(|e| e.path == "/c"));
 
-    writer.append_event(ev("write", "/d", "main"), 103).await.unwrap();
-    writer.append_event(ev("write", "/e", "feature"), 104).await.unwrap();
+    writer
+        .append_event(ev("write", "/d", "main"), 103)
+        .await
+        .unwrap();
+    writer
+        .append_event(ev("write", "/e", "feature"), 104)
+        .await
+        .unwrap();
     let batch = recv_batch(&mut feat).await;
     assert!(batch.iter().all(|e| e.branch.as_deref() == Some("feature")));
     assert!(batch.iter().any(|e| e.path == "/e"));
-    assert!(batch.iter().all(|e| e.path != "/d"), "main change filtered out");
+    assert!(
+        batch.iter().all(|e| e.path != "/d"),
+        "main change filtered out"
+    );
 }
 
 /// A from-zero / lagging subscriber pages the backlog in bounded batches
@@ -282,7 +317,11 @@ async fn postgres_drain_is_bounded() {
 
     let mut sub = meta.subscribe(0, None).await.unwrap();
     let first = recv_batch(&mut sub).await;
-    assert_eq!(first.len(), 1024, "first drain is capped at the batch limit");
+    assert_eq!(
+        first.len(),
+        1024,
+        "first drain is capped at the batch limit"
+    );
     let second = recv_batch(&mut sub).await;
     assert_eq!(second.len(), 76, "the remainder pages on the next drain");
     // ordered + contiguous across pages
@@ -316,7 +355,8 @@ async fn postgres_concurrent_same_path_create_leaves_no_orphans() {
     for i in 0..16 {
         let fs = fs.clone();
         handles.push(tokio::spawn(async move {
-            fs.write("/race.txt", format!("writer-{i}").as_bytes()).await
+            fs.write("/race.txt", format!("writer-{i}").as_bytes())
+                .await
         }));
     }
     let mut ok = 0;
@@ -330,7 +370,10 @@ async fn postgres_concurrent_same_path_create_leaves_no_orphans() {
     // there is exactly one dentry for it.
     assert!(ok >= 1, "at least one concurrent create must succeed");
     let body = fs.read("/race.txt").await.unwrap();
-    assert!(body.starts_with(b"writer-"), "content is one writer's bytes");
+    assert!(
+        body.starts_with(b"writer-"),
+        "content is one writer's bytes"
+    );
     let root = fs.ls("/").await.unwrap();
     assert_eq!(
         root.iter().filter(|e| e.name == "race.txt").count(),
@@ -431,7 +474,9 @@ async fn postgres_append_event_serializes_on_feed_lock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_concurrent_appends_deliver_every_event_once() {
     let Some(dsn) = dsn() else {
-        eprintln!("skipping postgres_concurrent_appends_deliver_every_event_once: AFS_PG_TEST_URL unset");
+        eprintln!(
+            "skipping postgres_concurrent_appends_deliver_every_event_once: AFS_PG_TEST_URL unset"
+        );
         return;
     };
     let _guard = pg_lock().lock().await;
@@ -465,7 +510,11 @@ async fn postgres_concurrent_appends_deliver_every_event_once() {
     seqs.sort_unstable();
     assert_eq!(seqs.len(), K);
     for w in seqs.windows(2) {
-        assert_eq!(w[1], w[0] + 1, "seqs must be contiguous — no gaps or duplicates");
+        assert_eq!(
+            w[1],
+            w[0] + 1,
+            "seqs must be contiguous — no gaps or duplicates"
+        );
     }
 
     // Every appended event is delivered exactly once, in increasing seq order.

@@ -3,9 +3,7 @@
 //! boundary, and `PackStore::repack` re-hashes survivors before copying them, so
 //! corruption surfaces as `AfsError::Corrupt` instead of silently propagating.
 
-use afs_core::{
-    AfsError, ContentStore, EncryptedStore, LocalCasStore, PackStore, VerifyingStore,
-};
+use afs_core::{AfsError, ContentStore, EncryptedStore, LocalCasStore, PackStore, VerifyingStore};
 use std::sync::Arc;
 
 /// The on-disk object path for a hash in a `LocalCasStore` rooted at `root`.
@@ -40,7 +38,10 @@ async fn verifying_store_detects_a_flipped_byte() {
         "whole read must be Corrupt"
     );
     assert!(
-        matches!(verified.get_range(&h, 0, 4).await, Err(AfsError::Corrupt(_))),
+        matches!(
+            verified.get_range(&h, 0, 4).await,
+            Err(AfsError::Corrupt(_))
+        ),
         "ranged read must be Corrupt too"
     );
 }
@@ -60,8 +61,14 @@ async fn repack_refuses_to_relaunder_a_corrupt_chunk() {
 
     // Two chunks in one pack; keep one live and delete the other -> partially
     // dead, which drives repack's survivor-copy path.
-    let keep = pack.put(b"surviving chunk AAAAAAAAAAAAAAAAAAAA").await.unwrap();
-    let dead = pack.put(b"dead chunk BBBBBBBBBBBBBBBBBBBBBBBBBB").await.unwrap();
+    let keep = pack
+        .put(b"surviving chunk AAAAAAAAAAAAAAAAAAAA")
+        .await
+        .unwrap();
+    let dead = pack
+        .put(b"dead chunk BBBBBBBBBBBBBBBBBBBBBBBBBB")
+        .await
+        .unwrap();
     pack.flush().await.unwrap();
     pack.delete(&dead).await.unwrap();
 
@@ -100,7 +107,8 @@ async fn verifying_store_passes_good_reads_through() {
 async fn verifying_store_over_encryption_roundtrips() {
     let dir = tempfile::tempdir().unwrap();
     let backend: Arc<dyn ContentStore> = Arc::new(LocalCasStore::open(dir.path()).await.unwrap());
-    let enc = Arc::new(EncryptedStore::from_passphrase(backend, "hunter2", b"test salt 16byte").unwrap());
+    let enc =
+        Arc::new(EncryptedStore::from_passphrase(backend, "hunter2", b"test salt 16byte").unwrap());
     let v = VerifyingStore::new(enc);
     let h = v.put(b"secret plaintext").await.unwrap();
     assert_eq!(&v.get(&h).await.unwrap()[..], b"secret plaintext");

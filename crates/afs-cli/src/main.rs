@@ -473,11 +473,7 @@ async fn main() -> Result<()> {
                 print!("{patch}");
             }
         }
-        Cmd::Accept {
-            id,
-            actor,
-            session,
-        } => {
+        Cmd::Accept { id, actor, session } => {
             let ctx = match session {
                 Some(s) => WriteCtx::session(actor, s),
                 None => WriteCtx::actor(actor),
@@ -485,11 +481,7 @@ async fn main() -> Result<()> {
             ws.accept_suggestion(id, ctx).await?;
             println!("accepted suggestion #{id}");
         }
-        Cmd::Reject {
-            id,
-            actor,
-            session,
-        } => {
+        Cmd::Reject { id, actor, session } => {
             let ctx = match session {
                 Some(s) => WriteCtx::session(actor, s),
                 None => WriteCtx::actor(actor),

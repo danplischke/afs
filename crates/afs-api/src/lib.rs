@@ -83,8 +83,14 @@ impl BearerAuth {
     }
 
     /// Map a bearer token to an actor (and optional session).
-    pub fn with_token(mut self, token: impl Into<String>, actor: i64, session: Option<i64>) -> Self {
-        self.tokens.insert(token.into(), Principal { actor, session });
+    pub fn with_token(
+        mut self,
+        token: impl Into<String>,
+        actor: i64,
+        session: Option<i64>,
+    ) -> Self {
+        self.tokens
+            .insert(token.into(), Principal { actor, session });
         self
     }
 
@@ -189,7 +195,10 @@ pub fn router_with(ws: Shared, auth: Arc<dyn Authenticator>, options: ApiOptions
         .route("/checkout", post(checkout))
         .route("/events", get(events))
         .route("/presence", get(presence))
-        .route("/suggestions", get(list_suggestions).post(create_suggestion))
+        .route(
+            "/suggestions",
+            get(list_suggestions).post(create_suggestion),
+        )
         .route("/suggestions/{id}", get(get_suggestion))
         .route("/suggestions/{id}/diff", get(suggestion_diff))
         .route("/suggestions/{id}/accept", post(accept_suggestion))
@@ -465,7 +474,10 @@ struct DiffEntryDto {
 
 /// `GET /diff?from=main&to=feature` — the changed-path list between two
 /// refs/commits (compared by content address).
-async fn diff(State(ws): State<Shared>, Query(q): Query<DiffQuery>) -> ApiResult<Json<Vec<DiffEntryDto>>> {
+async fn diff(
+    State(ws): State<Shared>,
+    Query(q): Query<DiffQuery>,
+) -> ApiResult<Json<Vec<DiffEntryDto>>> {
     let out = ws
         .diff(&q.from, &q.to)
         .await?
@@ -502,10 +514,7 @@ async fn diff_file(
     Query(q): Query<DiffFileQuery>,
 ) -> ApiResult<Json<DiffFileDto>> {
     let diff = ws.diff_file(&q.from, &q.to, &q.path).await?;
-    Ok(Json(DiffFileDto {
-        path: q.path,
-        diff,
-    }))
+    Ok(Json(DiffFileDto { path: q.path, diff }))
 }
 
 // --- agent-suggestion review queue ------------------------------------------
@@ -564,9 +573,11 @@ async fn create_suggestion(
 ) -> ApiResult<Json<serde_json::Value>> {
     let ctx = principal.write_ctx();
     let id = if q.delete {
-        ws.suggest_delete(ctx, &q.path, q.summary.as_deref()).await?
+        ws.suggest_delete(ctx, &q.path, q.summary.as_deref())
+            .await?
     } else {
-        ws.suggest(ctx, &q.path, &body, q.summary.as_deref()).await?
+        ws.suggest(ctx, &q.path, &body, q.summary.as_deref())
+            .await?
     };
     Ok(Json(json!({ "id": id })))
 }
@@ -689,7 +700,10 @@ struct BlameDto {
     kind: String,
 }
 
-async fn blame(State(ws): State<Shared>, Path(path): Path<String>) -> ApiResult<Json<Vec<BlameDto>>> {
+async fn blame(
+    State(ws): State<Shared>,
+    Path(path): Path<String>,
+) -> ApiResult<Json<Vec<BlameDto>>> {
     let out = ws
         .blame(&abspath(&path))
         .await?
@@ -805,8 +819,12 @@ async fn create_actor(
     Json(req): Json<ActorReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let id = if req.agent {
-        ws.create_agent(&req.name, req.model.as_deref().unwrap_or("unknown"), req.controller)
-            .await?
+        ws.create_agent(
+            &req.name,
+            req.model.as_deref().unwrap_or("unknown"),
+            req.controller,
+        )
+        .await?
     } else {
         ws.create_human(&req.name, None).await?
     };

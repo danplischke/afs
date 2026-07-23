@@ -15,9 +15,9 @@ use std::sync::Arc;
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, EventSubscription, FileKind, GcStats, Hash,
-    Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence, RebuildReport, S3Config,
-    Suggestion, SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit, VerifyingStore,
-    VersioningMode, WriteCtx,
+    Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence, RebuildReport,
+    S3Config, Suggestion, SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit,
+    VerifyingStore, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -80,7 +80,8 @@ impl Workspace {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
         // Verify integrity on read: object storage can bit-rot, so a corrupt
         // object surfaces as `Corrupt` rather than being served as authentic (M1).
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
+        let content: Content =
+            Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
         Self::open(meta, content).await
     }
 
@@ -132,7 +133,8 @@ impl Workspace {
     /// verified (a bit-rotted object surfaces as `Corrupt`, not as authentic).
     pub async fn open_pg_s3(dsn: &str, cfg: S3Config) -> Result<Self> {
         let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
+        let content: Content =
+            Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
         let mut ws = Self::open(pg.clone(), content).await?;
         ws.pg = Some(pg);
         Ok(ws)
@@ -162,7 +164,9 @@ impl Workspace {
     /// local development and tests without a live bucket; content is not durable.
     pub async fn open_object_memory(db_path: impl AsRef<Path>) -> Result<Self> {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::in_memory())));
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(
+            ObjectContentStore::in_memory(),
+        )));
         Self::open(meta, content).await
     }
 
@@ -244,7 +248,8 @@ impl Workspace {
 
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
         self.fs.rename(from, to).await?;
-        self.emit("rename", from, Some(to.to_string()), None, None).await;
+        self.emit("rename", from, Some(to.to_string()), None, None)
+            .await;
         Ok(())
     }
 

@@ -7,9 +7,12 @@ use std::path::Path;
 use std::process::Command;
 
 async fn workspace(dir: &Path, name: &str) -> Workspace {
-    Workspace::open_local(dir.join(format!("{name}.db")), dir.join(format!("{name}-cas")))
-        .await
-        .unwrap()
+    Workspace::open_local(
+        dir.join(format!("{name}.db")),
+        dir.join(format!("{name}-cas")),
+    )
+    .await
+    .unwrap()
 }
 
 fn git(dir: &Path, args: &[&str]) -> (bool, String, String) {
@@ -69,7 +72,10 @@ async fn roundtrip_for(fmt: ObjectFormat) {
     let dst = workspace(tmp.path(), "dst").await;
     import_git(&dst, &repo, "main").await.unwrap();
 
-    assert_eq!(&dst.read("/readme.md").await.unwrap()[..], b"# hello\nmore\n");
+    assert_eq!(
+        &dst.read("/readme.md").await.unwrap()[..],
+        b"# hello\nmore\n"
+    );
     assert_eq!(&dst.read("/dir/nested.txt").await.unwrap()[..], b"deep\n");
     assert_eq!(dst.readlink("/link").await.unwrap(), "/readme.md");
 
@@ -129,7 +135,10 @@ async fn real_git_reads_export(fmt: ObjectFormat) {
 
     let (ok, subjects, _) = git(&repo, &["log", "--format=%s", "main"]);
     assert!(ok);
-    assert_eq!(subjects.lines().collect::<Vec<_>>(), ["update top", "initial import"]);
+    assert_eq!(
+        subjects.lines().collect::<Vec<_>>(),
+        ["update top", "initial import"]
+    );
 
     // File contents are readable straight from the objects.
     let (ok, content, _) = git(&repo, &["show", "main:pkg/main.rs"]);
@@ -142,7 +151,10 @@ async fn real_git_reads_export(fmt: ObjectFormat) {
     // And a real checkout materializes a correct working tree.
     let (ok, _o, err) = git(&repo, &["reset", "--hard", "main"]);
     assert!(ok, "git reset --hard failed: {err}");
-    assert_eq!(std::fs::read(repo.join("pkg/main.rs")).unwrap(), b"fn main() {}\n");
+    assert_eq!(
+        std::fs::read(repo.join("pkg/main.rs")).unwrap(),
+        b"fn main() {}\n"
+    );
 }
 
 #[tokio::test]
@@ -182,8 +194,14 @@ async fn import_real_git(fmt: ObjectFormat) {
     let ws = workspace(tmp.path(), "ws").await;
     import_git(&ws, &repo, "main").await.unwrap();
 
-    assert_eq!(&ws.read("/src/lib.rs").await.unwrap()[..], b"pub fn f() {}\n");
-    assert_eq!(&ws.read("/README").await.unwrap()[..], b"a real repo, edited\n");
+    assert_eq!(
+        &ws.read("/src/lib.rs").await.unwrap()[..],
+        b"pub fn f() {}\n"
+    );
+    assert_eq!(
+        &ws.read("/README").await.unwrap()[..],
+        b"a real repo, edited\n"
+    );
 
     let log = ws.log().await.unwrap();
     assert_eq!(log.len(), 2);

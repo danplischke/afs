@@ -18,7 +18,10 @@ async fn rebuild_infers_head_when_no_mirror() {
         .put(
             &Manifest {
                 size: 2,
-                chunks: vec![ChunkRef { hash: chunk, len: 2 }],
+                chunks: vec![ChunkRef {
+                    hash: chunk,
+                    len: 2,
+                }],
             }
             .encode(),
         )
@@ -53,7 +56,10 @@ async fn rebuild_infers_head_when_no_mirror() {
         .unwrap();
 
     // A fresh, empty metadata DB over that content; rebuild with no mirror.
-    let fs = Fs::new(SqliteMetadataStore::open_in_memory().unwrap(), store.clone());
+    let fs = Fs::new(
+        SqliteMetadataStore::open_in_memory().unwrap(),
+        store.clone(),
+    );
     fs.init().await.unwrap();
     let report = fs.rebuild_from_content().await.unwrap();
 

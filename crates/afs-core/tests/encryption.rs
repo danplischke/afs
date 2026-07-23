@@ -2,7 +2,9 @@
 //! backend never contains the plaintext, dedup survives, GC still works, and the
 //! wrong key fails loudly.
 
-use afs_core::{ContentStore, EncryptedStore, Fs, Hash, LocalCasStore, MemStore, SqliteMetadataStore};
+use afs_core::{
+    ContentStore, EncryptedStore, Fs, Hash, LocalCasStore, MemStore, SqliteMetadataStore,
+};
 use std::sync::Arc;
 
 fn key(seed: u8) -> [u8; 32] {
@@ -21,10 +23,16 @@ async fn roundtrips_through_the_engine() {
     let big = vec![7u8; 300 * 1024]; // multi-chunk
     fs.write("/big.bin", &big).await.unwrap();
 
-    assert_eq!(&fs.read("/dir/a.txt").await.unwrap()[..], b"secret contents");
+    assert_eq!(
+        &fs.read("/dir/a.txt").await.unwrap()[..],
+        b"secret contents"
+    );
     assert_eq!(&fs.read("/big.bin").await.unwrap()[..], &big[..]);
     // Ranged reads decrypt correctly too.
-    assert_eq!(&fs.read_range("/big.bin", 10, 5).await.unwrap()[..], &big[10..15]);
+    assert_eq!(
+        &fs.read_range("/big.bin", 10, 5).await.unwrap()[..],
+        &big[10..15]
+    );
 }
 
 #[tokio::test]
@@ -97,7 +105,10 @@ async fn gc_works_through_encryption() {
     let stats = fs.gc().await.unwrap();
     assert!(stats.deleted > 0);
     // Live body still decrypts after collection.
-    assert_eq!(&fs.read("/a.bin").await.unwrap()[..], &vec![2u8; 200 * 1024][..]);
+    assert_eq!(
+        &fs.read("/a.bin").await.unwrap()[..],
+        &vec![2u8; 200 * 1024][..]
+    );
 }
 
 #[tokio::test]

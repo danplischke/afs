@@ -71,7 +71,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         let scan = self.scan(&mut report).await?;
         let (branches, head_target, used_mirror) = resolve_refs(&scan);
         report.used_mirror = used_mirror;
-        report.branches = branches.iter().map(|(n, h)| (n.clone(), h.to_hex())).collect();
+        report.branches = branches
+            .iter()
+            .map(|(n, h)| (n.clone(), h.to_hex()))
+            .collect();
         report.checked_out = pick_checkout(&branches, head_target);
         Ok(report)
     }

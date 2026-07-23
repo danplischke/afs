@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. a new push to a PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # afs-py is a pyo3 extension, so building the workspace needs a Python
+      # interpreter available for it to link against.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Postgres tests self-skip without AFS_PG_TEST_URL; the S3/GCS integration
+      # tests are #[ignore]d; and the FUSE / NFS / overlayfs tests self-skip when
+      # the needed privileges aren't present — so the suite is green on a stock
+      # runner with no extra services.
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+
+  python:
+    name: Python bindings (maturin + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Build the extension into a venv and run the Python test suite, which
+      # exercises the object-store content path (S3/GCS config + in-memory
+      # roundtrip) from Python.
+      - name: Build extension and run tests
+        working-directory: crates/afs-py
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install maturin pytest
+          maturin develop
+          pytest -q tests

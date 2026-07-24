@@ -165,7 +165,8 @@ impl Workspace {
     /// as `Corrupt` rather than being served as authentic).
     pub async fn open_gcs(db_path: impl AsRef<Path>, cfg: GcsConfig) -> Result<Self> {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::gcs(cfg)?)));
+        let content: Content =
+            Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::gcs(cfg)?)));
         Self::open(meta, content).await
     }
 
@@ -191,7 +192,8 @@ impl Workspace {
     /// verified (a bit-rotted object surfaces as `Corrupt`, not as authentic).
     pub async fn open_pg_gcs(dsn: &str, cfg: GcsConfig) -> Result<Self> {
         let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::gcs(cfg)?)));
+        let content: Content =
+            Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::gcs(cfg)?)));
         let mut ws = Self::open(pg.clone(), content).await?;
         ws.pg = Some(pg);
         Ok(ws)

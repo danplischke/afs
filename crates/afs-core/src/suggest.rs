@@ -18,7 +18,6 @@ use crate::content::ContentStore;
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::types::Hash;
-use crate::util::now_secs;
 
 /// The lifecycle state of a suggestion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,7 +164,7 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
                     proposed_hash,
                     summary: summary.map(str::to_string),
                 },
-                now_secs(),
+                self.now_secs(),
             )
             .await?;
         self.record_event(EventInit {
@@ -323,7 +322,7 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
                 id,
                 SuggestionStatus::Accepted,
                 Some(approver.actor),
-                now_secs(),
+                self.now_secs(),
             )
             .await?;
         self.record_event(EventInit {
@@ -356,7 +355,7 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
                 id,
                 SuggestionStatus::Rejected,
                 Some(approver.actor),
-                now_secs(),
+                self.now_secs(),
             )
             .await?;
         self.record_event(EventInit {

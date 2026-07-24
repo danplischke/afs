@@ -18,7 +18,6 @@ use crate::content::ContentStore;
 use crate::engine::Fs;
 use crate::error::Result;
 use crate::metadata::MetadataStore;
-use crate::util::now_secs;
 
 /// The channel Postgres backends `NOTIFY` on when an event is appended.
 pub const EVENT_CHANNEL: &str = "afs_events";
@@ -69,7 +68,7 @@ pub const PRESENCE_WINDOW_SECS: i64 = 60;
 impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Append an event to the change feed, returning its `seq` cursor.
     pub async fn record_event(&self, ev: EventInit) -> Result<i64> {
-        self.meta.append_event(ev, now_secs()).await
+        self.meta.append_event(ev, self.now_secs()).await
     }
 
     /// Events strictly after `after_seq`, oldest first (cursor-based tailing).
@@ -85,19 +84,21 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         path: Option<&str>,
     ) -> Result<()> {
         self.meta
-            .touch_presence(session_id, actor_id, path, now_secs())
+            .touch_presence(session_id, actor_id, path, self.now_secs())
             .await
     }
 
     /// Sessions active within `window_secs`, most recently seen first.
     pub async fn presence(&self, window_secs: i64) -> Result<Vec<Presence>> {
-        self.meta.active_presence(now_secs() - window_secs).await
+        self.meta
+            .active_presence(self.now_secs() - window_secs)
+            .await
     }
 
     /// Reap presence rows older than `grace_secs` so the table doesn't grow
     /// without bound (one row accretes per session). Call periodically; use a
     /// grace comfortably larger than the presence window. Returns rows reaped.
     pub async fn reap_presence(&self, grace_secs: i64) -> Result<u64> {
-        self.meta.reap_presence(now_secs() - grace_secs).await
+        self.meta.reap_presence(self.now_secs() - grace_secs).await
     }
 }

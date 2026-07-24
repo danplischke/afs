@@ -10,7 +10,7 @@ __pycache__/
 .venv/
 venv/
 
-# afs workspaces the demo server creates locally
+# origo workspaces the demo server creates locally
 cas/
 *.db
-afs-web-ws/
+origo-web-ws/

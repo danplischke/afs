@@ -20,6 +20,12 @@ const DIR_MODE: u32 = 0o040755;
 const FILE_MODE: u32 = 0o100644;
 const SYMLINK_MODE: u32 = 0o120777;
 
+/// Bound on retries when a concurrent writer wins the create race for a new
+/// path. One retry resolves it in practice (the loser then finds the inode and
+/// updates it); the bound only guards against a pathological churn of
+/// create/delete on the same name.
+pub(crate) const CREATE_RETRIES: usize = 16;
+
 /// Reject a single path component that could escape the workspace tree or
 /// corrupt the dentry graph: the traversal names `.`/`..`, an empty name, or a
 /// name embedding a path separator or NUL. Enforced at every metadata boundary
@@ -365,19 +371,36 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     pub async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
         let (parent, name) = self.resolve_parent(path).await?;
         self.ensure_dir(parent).await?;
-        let existing = self.lookup_file(parent, name, path).await?;
         // Content is made durable first (store_body flushes), then the metadata
         // that references it commits atomically: for a new file the inode, its
         // dentry, and its content all land together or not at all (C1).
         let (mhash, size) = self.store_body(data).await?;
-        let mut tx = self.meta.begin().await?;
-        let ino = match existing {
-            Some(ino) => ino,
-            None => Self::create_file_in(tx.as_mut(), parent, name).await?,
-        };
-        tx.set_content(ino, mhash, size).await?;
-        tx.commit().await?;
-        Ok(())
+        // The lookup is *before* the transaction, so a concurrent writer can
+        // create the same new path in between. On that unique-index failure we
+        // roll back and retry, adopting their inode and applying this write as an
+        // update — so racing create-or-update writes linearize instead of one
+        // spuriously failing with `AlreadyExists` (mirrors `mkdir_p`).
+        for _ in 0..CREATE_RETRIES {
+            let existing = self.lookup_file(parent, name, path).await?;
+            let mut tx = self.meta.begin().await?;
+            let ino = match existing {
+                Some(ino) => ino,
+                None => match Self::create_file_in(tx.as_mut(), parent, name).await {
+                    Ok(ino) => ino,
+                    Err(AfsError::AlreadyExists(_)) => {
+                        drop(tx);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
+            };
+            tx.set_content(ino, mhash, size).await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+        Err(AfsError::Conflict(format!(
+            "{path}: too many concurrent creators"
+        )))
     }
 
     /// Write a file by streaming from a blocking reader, chunking incrementally so

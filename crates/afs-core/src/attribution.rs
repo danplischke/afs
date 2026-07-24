@@ -383,93 +383,121 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     ) -> Result<()> {
         let (parent, name) = self.resolve_parent(path).await?;
         self.ensure_dir(parent).await?;
-        let existing = self.lookup_file(parent, name, path).await?;
 
-        // Prior content + authorship (reads, before the txn). A new file starts
-        // from empty bytes and no authorship.
-        let (pre_hash, old_bytes, old_authors) = match existing {
-            Some(ino) => {
-                let inode = self
-                    .meta
-                    .get_inode(ino)
-                    .await?
-                    .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
-                let pre = inode.content;
-                let bytes = match pre {
-                    Some(h) => self.read_body(&h).await?,
-                    None => Vec::new(),
-                };
-                // Prior authorship comes from the *content* the inode points at,
-                // so it survives checkout/merge and never desyncs (M9).
-                let authors = match &pre {
-                    Some(h) => match self.meta.get_blob_blame(h).await? {
-                        Some(s) => BlameMap::decode(&s).per_line(),
-                        None => Vec::new(),
-                    },
-                    None => Vec::new(),
-                };
-                (pre, bytes, authors)
-            }
-            None => (None, Vec::new(), Vec::new()),
-        };
-
-        // Compute the new line authorship.
-        let blame = if is_text(&old_bytes) && is_text(data) {
-            let new_authors = diff_authors(&old_bytes, data, &old_authors, (ctx.actor, ctx.sid()));
-            BlameMap::from_per_line(&new_authors)
-        } else {
-            // Binary: file-level attribution (single unit).
-            BlameMap::from_per_line(&[(ctx.actor, ctx.sid())])
-        };
-
-        // Content durable first, then commit blame + content + op-log together
-        // with the file's creation, so a crash can never leave a visible file
-        // with mismatched content/blame or a "successful" write half-recorded
-        // (C1). The op-log — the durable attribution ground truth — lands in the
-        // same transaction as the content it describes.
+        // Content durable first (store_body is idempotent, so it's computed once
+        // and reused across create-race retries), then commit blame + content +
+        // op-log together with the file's creation, so a crash can never leave a
+        // visible file with mismatched content/blame or a "successful" write
+        // half-recorded (C1). The op-log — the durable attribution ground truth —
+        // lands in the same transaction as the content it describes.
         let (mhash, size) = self.store_body(data).await?;
-        let mut tx = self.meta.begin().await?;
-        let ino = match existing {
-            Some(ino) => ino,
-            None => Self::create_file_in(tx.as_mut(), parent, name).await?,
-        };
-        // Blame is keyed by the new content version (its manifest hash); an empty
-        // file has no content and no blame.
-        if let Some(h) = mhash {
-            tx.set_blob_blame(&h, &blame.encode()).await?;
-        }
-        match &expect {
-            None => tx.set_content(ino, mhash, size).await?,
-            // Conditional apply: only write if the content is still what the
-            // caller based this write on. On mismatch the whole transaction rolls
-            // back (undoing the blame staged just above), so nothing is clobbered.
-            Some(expected) => {
-                if !tx
-                    .set_content_if(ino, expected.as_ref(), mhash, size)
-                    .await?
-                {
-                    return Err(AfsError::Conflict(format!(
-                        "{path} changed since the write was based on it"
-                    )));
+
+        // The lookup is *before* the transaction, so a concurrent writer can
+        // create the same new path in between. On that unique-index failure we
+        // roll back and retry: a plain write adopts their inode and applies as an
+        // update; a conditional write that required the file to be absent fails
+        // with `Conflict` (mirrors `mkdir_p`'s create-race handling).
+        for _ in 0..crate::engine::CREATE_RETRIES {
+            let existing = self.lookup_file(parent, name, path).await?;
+
+            // Prior content + authorship (reads, before the txn). A new file
+            // starts from empty bytes and no authorship.
+            let (pre_hash, old_bytes, old_authors) = match existing {
+                Some(ino) => {
+                    let inode = self
+                        .meta
+                        .get_inode(ino)
+                        .await?
+                        .ok_or_else(|| AfsError::NotFound(path.to_string()))?;
+                    let pre = inode.content;
+                    let bytes = match pre {
+                        Some(h) => self.read_body(&h).await?,
+                        None => Vec::new(),
+                    };
+                    // Prior authorship comes from the *content* the inode points
+                    // at, so it survives checkout/merge and never desyncs (M9).
+                    let authors = match &pre {
+                        Some(h) => match self.meta.get_blob_blame(h).await? {
+                            Some(s) => BlameMap::decode(&s).per_line(),
+                            None => Vec::new(),
+                        },
+                        None => Vec::new(),
+                    };
+                    (pre, bytes, authors)
+                }
+                None => (None, Vec::new(), Vec::new()),
+            };
+
+            // Compute the new line authorship against whatever is there now.
+            let blame = if is_text(&old_bytes) && is_text(data) {
+                let new_authors =
+                    diff_authors(&old_bytes, data, &old_authors, (ctx.actor, ctx.sid()));
+                BlameMap::from_per_line(&new_authors)
+            } else {
+                // Binary: file-level attribution (single unit).
+                BlameMap::from_per_line(&[(ctx.actor, ctx.sid())])
+            };
+
+            let mut tx = self.meta.begin().await?;
+            let ino = match existing {
+                Some(ino) => ino,
+                None => match Self::create_file_in(tx.as_mut(), parent, name).await {
+                    Ok(ino) => ino,
+                    Err(AfsError::AlreadyExists(_)) => {
+                        drop(tx);
+                        // A conditional write that required absence can't proceed
+                        // once the file exists.
+                        if matches!(expect, Some(None)) {
+                            return Err(AfsError::Conflict(format!(
+                                "{path} was created concurrently"
+                            )));
+                        }
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
+            };
+            // Blame is keyed by the new content version (its manifest hash); an
+            // empty file has no content and no blame.
+            if let Some(h) = mhash {
+                tx.set_blob_blame(&h, &blame.encode()).await?;
+            }
+            match &expect {
+                None => tx.set_content(ino, mhash, size).await?,
+                // Conditional apply: only write if the content is still what the
+                // caller based this write on. On mismatch the whole transaction
+                // rolls back (undoing the blame staged just above).
+                Some(expected) => {
+                    if !tx
+                        .set_content_if(ino, expected.as_ref(), mhash, size)
+                        .await?
+                    {
+                        return Err(AfsError::Conflict(format!(
+                            "{path} changed since the write was based on it"
+                        )));
+                    }
                 }
             }
+            tx.append_edit_op(EditOpInit {
+                session_id: ctx.session,
+                actor_id: ctx.actor,
+                tool_call_id: ctx.tool_call,
+                ino,
+                path: path.to_string(),
+                op: "write".to_string(),
+                byte_start: 0,
+                byte_len: data.len() as i64,
+                pre_hash: pre_hash.map(|h| h.to_hex()),
+                post_hash: mhash.map(|h| h.to_hex()),
+                ts: self.now_secs(),
+            })
+            .await?;
+            tx.commit().await?;
+            return Ok(());
         }
-        tx.append_edit_op(EditOpInit {
-            session_id: ctx.session,
-            actor_id: ctx.actor,
-            tool_call_id: ctx.tool_call,
-            ino,
-            path: path.to_string(),
-            op: "write".to_string(),
-            byte_start: 0,
-            byte_len: data.len() as i64,
-            pre_hash: pre_hash.map(|h| h.to_hex()),
-            post_hash: mhash.map(|h| h.to_hex()),
-            ts: self.now_secs(),
-        })
-        .await?;
-        tx.commit().await?;
-        Ok(())
+        Err(AfsError::Conflict(format!(
+            "{path}: too many concurrent creators"
+        )))
     }
 
     // --- queries ----------------------------------------------------------

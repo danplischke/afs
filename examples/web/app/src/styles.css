@@ -1,0 +1,694 @@
+:root {
+  --bg: #fbfbfd;
+  --panel: #ffffff;
+  --ink: #1b1d23;
+  --muted: #6b7180;
+  --hairline: #e6e8ee;
+  --accent: #4f46e5;
+  --accent-ink: #ffffff;
+  --add-bg: #e6f6ec;
+  --add-ink: #1a7f37;
+  --del-bg: #fdecec;
+  --del-ink: #c0362c;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --ink: #e7e9ef;
+    --muted: #9aa1b1;
+    --hairline: #262a35;
+    --accent: #7c74ff;
+    --add-bg: #14301f;
+    --add-ink: #57d987;
+    --del-bg: #35191a;
+    --del-ink: #f0817a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--bg);
+  font-size: 14px;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 5px 11px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+input,
+select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+code {
+  font-family: var(--mono);
+}
+
+/* --- layout --------------------------------------------------------------- */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--panel);
+}
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.logo {
+  font-weight: 800;
+  font-size: 18px;
+  letter-spacing: -0.5px;
+}
+.tagline {
+  color: var(--muted);
+  font-size: 12px;
+}
+.doc-open {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.doc-open input {
+  width: 240px;
+  font-family: var(--mono);
+}
+.signin {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.signin .me {
+  font-weight: 600;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sidebar {
+  width: 310px;
+  border-left: 1px solid var(--hairline);
+  background: var(--panel);
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+.tabs button {
+  text-transform: capitalize;
+  background: transparent;
+  border-color: transparent;
+}
+.tabs button.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+}
+.tabs .doc-name {
+  margin-left: auto;
+  font-family: var(--mono);
+  color: var(--muted);
+  font-size: 12px;
+}
+.tab-body {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+/* --- editor + gutter ------------------------------------------------------ */
+
+.editor-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+.toolbar .spacer {
+  flex: 1;
+}
+.toolbar .toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.status.ok {
+  color: var(--add-ink);
+}
+.status.err {
+  color: var(--del-ink);
+}
+.hint {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.editor-surface {
+  position: relative;
+  padding: 0 20px 40vh 20px;
+}
+/* Native inline attribution: the AttributionPlugin decorates authored text with
+   an author-colored underline (rendered through Plate's leaf pipeline). */
+.attributed {
+  border-radius: 2px;
+}
+/* The caret line's author, from useEditorSelection (no DOM measurement). */
+.active-author {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 2px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.plate-content {
+  outline: none;
+  min-height: 200px;
+  line-height: 1.6;
+  max-width: 720px;
+}
+.plate-content:focus {
+  outline: none;
+}
+.plate-content h1 {
+  font-size: 1.7em;
+  margin: 0.6em 0 0.3em;
+}
+.plate-content h2 {
+  font-size: 1.4em;
+  margin: 0.6em 0 0.3em;
+}
+.plate-content h3 {
+  font-size: 1.2em;
+  margin: 0.6em 0 0.3em;
+}
+.plate-content p {
+  margin: 0.4em 0;
+}
+.plate-content blockquote {
+  margin: 0.5em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--hairline);
+  color: var(--muted);
+}
+.plate-content ul,
+.plate-content ol {
+  padding-left: 1.4em;
+}
+.plate-content code {
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.plate-content pre {
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+/* --- inline suggestion review (VSCode-style agent edits) ------------------ */
+
+.edit-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.edit-pane > .editor-tab {
+  flex: 1;
+  min-height: 0;
+}
+
+.review-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: color-mix(in srgb, #b7791f 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, #b7791f 40%, transparent);
+  font-size: 13px;
+}
+.review-banner-icon {
+  font-size: 16px;
+}
+.ok-notice {
+  background: var(--add-bg);
+  border-color: var(--add-ink);
+  color: var(--add-ink);
+}
+
+.review {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.review-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline);
+  flex-wrap: wrap;
+}
+.review-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.review-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+.review-bar .row-actions {
+  margin-left: auto;
+}
+.review-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+/* Inline track-changes: the proposal rendered in a read-only Plate editor, with
+   the agent's changes inline (old red / new green) and a ✓/✗ per change. */
+.suggestion-doc {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 20px 40vh;
+}
+.suggestion-doc .plate-content {
+  max-width: 820px;
+  margin: 0 auto;
+  padding-left: 56px; /* room for the ✓/✗ controls in the margin */
+  position: relative;
+}
+.sug-change {
+  position: relative;
+  border-radius: 4px;
+}
+.sug-controls {
+  position: absolute;
+  left: -52px;
+  display: inline-flex;
+  gap: 2px;
+  user-select: none;
+}
+.sug-controls button {
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  border-radius: 5px;
+}
+.sug-controls button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.w-del,
+.w-add {
+  border-radius: 3px;
+  padding: 0 1px;
+  text-decoration: none;
+}
+.w-del {
+  text-decoration: line-through;
+}
+.sug-change.kept .w-del {
+  color: var(--del-ink);
+  background: color-mix(in srgb, var(--del-ink) 12%, transparent);
+  opacity: 0.72;
+}
+.sug-change.kept .w-add {
+  color: var(--add-ink);
+  background: color-mix(in srgb, var(--add-ink) 16%, transparent);
+  text-decoration: none;
+}
+.sug-change.discarded .w-add {
+  color: var(--muted);
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.sug-change.discarded .w-del {
+  color: var(--ink);
+  background: transparent;
+  text-decoration: none;
+  opacity: 1;
+}
+
+/* --- blame view ----------------------------------------------------------- */
+
+.blame-view {
+  padding: 12px 16px;
+}
+.blame-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.blame-table td {
+  padding: 0;
+  vertical-align: top;
+}
+.blame-actor {
+  width: 170px;
+  max-width: 170px;
+  padding: 1px 8px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+.blame-actor .muted {
+  color: var(--muted);
+}
+.blame-lineno {
+  width: 42px;
+  text-align: right;
+  color: var(--muted);
+  padding: 1px 10px 1px 6px !important;
+  user-select: none;
+}
+.blame-code {
+  border-left: 3px solid transparent;
+  padding-left: 10px !important;
+  width: 100%;
+}
+.blame-code pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* --- panels (history / suggestions) --------------------------------------- */
+
+.panel {
+  padding: 12px 16px;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.panel-head h3 {
+  margin: 0;
+}
+.row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.commit-list,
+.sug-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.commit-list li,
+.sug-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 12px;
+  border-top: 1px solid var(--hairline);
+  cursor: pointer;
+}
+.commit-list li:first-child,
+.sug-list li:first-child {
+  border-top: none;
+}
+.commit-list li:hover,
+.sug-list li:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.commit-list li.selected,
+.sug-list li.selected {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.hash {
+  color: var(--accent);
+  font-size: 12px;
+}
+.commit-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-meta {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.sug-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--hairline);
+}
+.sug-status.pending {
+  color: #b7791f;
+  border-color: #b7791f;
+}
+.sug-status.accepted {
+  color: var(--add-ink);
+  border-color: var(--add-ink);
+}
+.sug-status.rejected,
+.sug-status.superseded {
+  color: var(--muted);
+}
+.sug-path {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.sug-summary {
+  flex: 1;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-pane {
+  margin-top: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--muted) 8%, transparent);
+  border-bottom: 1px solid var(--hairline);
+  font-size: 13px;
+}
+.diff-text {
+  margin: 0;
+  padding: 8px 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-x: auto;
+}
+.diff-line {
+  display: block;
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-line.add {
+  background: var(--add-bg);
+  color: var(--add-ink);
+}
+.diff-line.del {
+  background: var(--del-bg);
+  color: var(--del-ink);
+}
+.diff-line.hunk {
+  color: var(--accent);
+}
+.diff-line.meta {
+  color: var(--muted);
+}
+
+/* --- sidebar activity ----------------------------------------------------- */
+
+.activity {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.activity h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+.presence-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.feed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.feed-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.feed-verb {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: lowercase;
+}
+.feed-who {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.feed-path {
+  font-family: var(--mono);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.feed-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* --- shared bits ---------------------------------------------------------- */
+
+.actor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  max-width: 100%;
+}
+.actor-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.muted {
+  color: var(--muted);
+}
+.spacer {
+  flex: 1;
+}
+.empty {
+  padding: 24px;
+  color: var(--muted);
+}
+.notice {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  margin: 12px 16px;
+  font-size: 13px;
+}
+.notice.err {
+  background: var(--del-bg);
+  border-color: var(--del-ink);
+  color: var(--del-ink);
+}

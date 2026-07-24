@@ -152,6 +152,10 @@ failed). The DB stays the thing to back up — so also run Postgres PITR / a rep
   own header auth.
 - `examples/fastapi_app.py` — the same surface written out as hand-rolled
   endpoints, if you'd rather own each route.
+- **`examples/web/`** (repo root) — a full-stack **React + PlateJS** editor over
+  this router, showing per-block and per-line **attribution** (blame), version
+  **lineage** (commit history + diffs), and the agent-suggestion review queue,
+  with a live SSE feed. The visual companion to `collab_app.py`.
 
 ## API surface
 

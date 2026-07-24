@@ -17,12 +17,6 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const SYMLINK_MODE: u32 = 0o120777;
 
-/// Ceiling on a single file's size. Whole-file operations (write/truncate)
-/// materialize the body in memory, so an unbounded client-supplied size/offset
-/// would otherwise abort the process on the allocation. Values above this are
-/// rejected with [`AfsError::TooLarge`] (mapped to `EFBIG`/`NFS3ERR_FBIG`).
-pub const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
-
 impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Look up `name` in directory `parent`, returning its inode.
     pub async fn vfs_lookup(&self, parent: Ino, name: &str) -> Result<Option<Inode>> {
@@ -82,16 +76,21 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             Some(h) => self.read_body(&h).await?,
             None => Vec::new(),
         };
-        // Checked: a hostile offset near u64::MAX would otherwise overflow and
-        // trigger a giant resize / slice-index panic.
+        // This path rewrites the whole file in memory (read-modify-write), so the
+        // only real ceiling is what can actually be allocated — there is no fixed
+        // file-size limit. A hostile offset/size (e.g. near u64::MAX) must still
+        // fail cleanly rather than overflow or abort the process: reject an
+        // overflowing end, one that can't be addressed, or one we can't reserve.
         let end = offset
             .checked_add(data.len() as u64)
-            .filter(|&e| e <= MAX_FILE_SIZE)
-            .ok_or_else(|| {
-                AfsError::TooLarge(format!("write past {MAX_FILE_SIZE} bytes (ino {ino})"))
-            })?;
-        let end = end as usize;
+            .ok_or_else(|| AfsError::TooLarge(format!("write end overflows u64 (ino {ino})")))?;
+        let end = usize::try_from(end)
+            .map_err(|_| AfsError::TooLarge(format!("write past {end} bytes (ino {ino})")))?;
         if bytes.len() < end {
+            let extra = end - bytes.len();
+            bytes.try_reserve(extra).map_err(|_| {
+                AfsError::TooLarge(format!("cannot allocate {end} bytes (ino {ino})"))
+            })?;
             bytes.resize(end, 0);
         }
         bytes[offset as usize..end].copy_from_slice(data);
@@ -103,16 +102,22 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// Truncate/extend a file to `size` bytes.
     pub async fn vfs_truncate(&self, ino: Ino, size: u64) -> Result<()> {
         let inode = self.vfs_getattr(ino).await?;
-        if size > MAX_FILE_SIZE {
-            return Err(AfsError::TooLarge(format!(
-                "truncate to {size} bytes exceeds {MAX_FILE_SIZE} (ino {ino})"
-            )));
-        }
+        // No fixed ceiling: growing a file materializes it in memory, so bound
+        // only by what can actually be addressed and allocated — a hostile size
+        // (e.g. u64::MAX) fails as TooLarge instead of aborting the process.
+        let target = usize::try_from(size)
+            .map_err(|_| AfsError::TooLarge(format!("truncate to {size} bytes (ino {ino})")))?;
         let mut bytes = match inode.content {
             Some(h) => self.read_body(&h).await?,
             None => Vec::new(),
         };
-        bytes.resize(size as usize, 0);
+        if target > bytes.len() {
+            let extra = target - bytes.len();
+            bytes.try_reserve(extra).map_err(|_| {
+                AfsError::TooLarge(format!("cannot allocate {size} bytes (ino {ino})"))
+            })?;
+        }
+        bytes.resize(target, 0);
         let (mhash, sz) = self.store_body(&bytes).await?;
         self.meta.set_content(ino, mhash, sz).await?;
         Ok(())

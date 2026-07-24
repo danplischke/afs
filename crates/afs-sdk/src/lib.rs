@@ -20,6 +20,7 @@ pub use afs_core::{
     TieredStore, ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
+pub use futures::stream::BoxStream;
 
 type Meta = Arc<dyn MetadataStore>;
 type Content = Arc<dyn ContentStore>;
@@ -280,6 +281,23 @@ impl Workspace {
 
     pub async fn read_range(&self, path: &str, off: u64, len: u64) -> Result<Bytes> {
         self.fs.read_range(path, off, len).await
+    }
+
+    /// Stream a file's body chunk-by-chunk without holding it all in memory — the
+    /// memory-bounded counterpart to [`Self::read`] for large files (afs imposes
+    /// no fixed file-size ceiling). The stream is `'static`, so it can be moved
+    /// into a spawned task or an HTTP response body.
+    pub async fn read_stream(&self, path: &str) -> Result<BoxStream<'static, Result<Bytes>>> {
+        self.fs.read_stream_owned(path).await
+    }
+
+    /// Stream a file's body into an async writer without ever materializing it
+    /// whole; returns the number of bytes written.
+    pub async fn read_to_writer<W>(&self, path: &str, writer: W) -> Result<u64>
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send,
+    {
+        self.fs.read_to_writer(path, writer).await
     }
 
     pub async fn mkdir_p(&self, path: &str) -> Result<()> {

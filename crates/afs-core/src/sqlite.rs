@@ -595,8 +595,16 @@ impl MetadataStore for SqliteMetadataStore {
         })?;
         let mut actors = Vec::new();
         for row in rows {
-            let (id, kind, display_name, auth_subject, agent_model, agent_vendor, controller, created_at) =
-                row?;
+            let (
+                id,
+                kind,
+                display_name,
+                auth_subject,
+                agent_model,
+                agent_vendor,
+                controller,
+                created_at,
+            ) = row?;
             let kind = ActorKind::parse(&kind)
                 .ok_or_else(|| AfsError::Metadata(format!("bad actor kind {kind:?}")))?;
             actors.push(Actor {

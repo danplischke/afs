@@ -20,8 +20,7 @@ use afs_core::LocalCasStore;
 use afs_sdk::{
     Actor, BlameRange, CommitInfo, DiffEntry, DiffStatus, DirEntry, Event, EventSubscription,
     GcsConfig as CoreGcsConfig, Inode, Presence, RebuildReport, S3Config as CoreS3Config,
-    Suggestion, SuggestionStatus,
-    Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
+    Suggestion, SuggestionStatus, Workspace as CoreWorkspace, WriteCtx as CoreWriteCtx,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{

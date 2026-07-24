@@ -20,7 +20,6 @@ use crate::engine::Fs;
 use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::types::{Hash, Ino};
-use crate::util::now_secs;
 use similar::{ChangeTag, TextDiff};
 use std::collections::{HashMap, VecDeque};
 
@@ -343,7 +342,9 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     }
 
     pub async fn create_session(&self, actor_id: i64, client: Option<&str>) -> Result<i64> {
-        self.meta.create_session(actor_id, client, now_secs()).await
+        self.meta
+            .create_session(actor_id, client, self.now_secs())
+            .await
     }
 
     pub async fn record_tool_call(&self, tc: ToolCallInit) -> Result<i64> {
@@ -488,7 +489,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 byte_len: data.len() as i64,
                 pre_hash: pre_hash.map(|h| h.to_hex()),
                 post_hash: mhash.map(|h| h.to_hex()),
-                ts: now_secs(),
+                ts: self.now_secs(),
             })
             .await?;
             tx.commit().await?;
@@ -615,7 +616,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 byte_len: size as i64,
                 pre_hash: None,
                 post_hash: mhash.map(|h| h.to_hex()),
-                ts: now_secs(),
+                ts: self.now_secs(),
             })
             .await?;
             tx.commit().await?;

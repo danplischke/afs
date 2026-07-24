@@ -10,6 +10,7 @@
 
 pub mod attribution;
 pub mod chunk;
+pub mod clock;
 pub mod collab;
 pub mod content;
 pub mod encrypt;
@@ -34,6 +35,7 @@ pub mod vfs;
 
 pub use attribution::{Actor, ActorInit, ActorKind, BlameRange, EditOp, ToolCallInit, WriteCtx};
 pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};
+pub use clock::{Clock, SystemClock};
 pub use collab::{EVENT_CHANNEL, Event, EventInit, PRESENCE_WINDOW_SECS, Presence};
 pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore, VerifyingStore};
 pub use encrypt::EncryptedStore;

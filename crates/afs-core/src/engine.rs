@@ -6,6 +6,7 @@
 //! (M4), and attribution (M6) on top without changing this surface.
 
 use crate::chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest, chunk_bounds};
+use crate::clock::{Clock, SystemClock};
 use crate::content::ContentStore;
 use crate::error::{AfsError, Result};
 use crate::metadata::{MetaTxn, MetadataStore};
@@ -13,6 +14,7 @@ use crate::types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};
 use bytes::{Bytes, BytesMut};
 use futures::Stream;
 use futures::stream::{BoxStream, StreamExt};
+use std::sync::Arc;
 
 const DIR_MODE: u32 = 0o040755;
 const FILE_MODE: u32 = 0o100644;
@@ -66,11 +68,37 @@ fn owned_chunk_stream<S: ContentStore + 'static>(
 pub struct Fs<M: MetadataStore, C: ContentStore> {
     pub meta: M,
     pub content: C,
+    /// The time source for engine-layer timestamps (commits, edit-ops, events,
+    /// presence, locks, sessions). Injectable so a deterministic simulation can
+    /// reproduce every timestamp — and thus every commit hash — from a seed.
+    pub(crate) clock: Arc<dyn Clock>,
 }
 
 impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     pub fn new(meta: M, content: C) -> Self {
-        Self { meta, content }
+        Self {
+            meta,
+            content,
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    /// Construct with an injected [`Clock`] instead of the wall clock — the entry
+    /// point deterministic simulation (and any time-sensitive test) uses so a
+    /// seed reproduces every engine-layer timestamp exactly.
+    pub fn with_clock(meta: M, content: C, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            meta,
+            content,
+            clock,
+        }
+    }
+
+    /// The current time from the injected clock, in whole seconds since the Unix
+    /// epoch. All engine-layer timestamps go through here (not `util::now_secs`)
+    /// so simulation can control them.
+    pub(crate) fn now_secs(&self) -> i64 {
+        self.clock.now_secs()
     }
 
     /// Initialize the metadata schema, the root directory, and versioning state

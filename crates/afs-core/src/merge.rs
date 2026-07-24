@@ -15,7 +15,6 @@ use crate::error::{AfsError, Result};
 use crate::metadata::MetadataStore;
 use crate::objectgraph::{Commit, Tree, TreeEntry, TreeKind};
 use crate::types::Hash;
-use crate::util::now_secs;
 use async_recursion::async_recursion;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -186,7 +185,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 parents: vec![ours, theirs],
                 author: author.to_string(),
                 message: message.to_string(),
-                timestamp: now_secs(),
+                timestamp: self.now_secs(),
             };
             let commit_hash = self.content.put(&commit.encode()).await?;
             // Advance the ref FIRST (checked), then reflect it in the working
@@ -403,7 +402,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
 
     /// Acquire an exclusive lock on `path` for `owner`; `false` if already held.
     pub async fn lock(&self, path: &str, owner: &str) -> Result<bool> {
-        self.meta.acquire_lock(path, owner, now_secs()).await
+        self.meta.acquire_lock(path, owner, self.now_secs()).await
     }
 
     /// Release `owner`'s lock on `path`.

@@ -373,3 +373,63 @@ async fn find_or_create_actor_is_idempotent_by_subject() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn actor_lookup_by_id_and_list() {
+    let fs = fixture().await;
+    let alice = fs.create_human("Alice", Some("alice@x")).await.unwrap();
+    let claude = fs
+        .create_agent("claude", "claude-opus-4-8", Some(alice))
+        .await
+        .unwrap();
+
+    // get_actor resolves a bare id (as carried by events/suggestions) to the record.
+    let a = fs.get_actor(alice).await.unwrap().expect("alice exists");
+    assert_eq!((a.id, a.kind), (alice, ActorKind::Human));
+    assert_eq!(a.display_name, "Alice");
+    assert!(fs.get_actor(9999).await.unwrap().is_none());
+
+    // list_actors returns everyone, oldest first, with kind/model/controller.
+    let all = fs.list_actors().await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].id, alice);
+    assert_eq!((all[1].id, all[1].kind), (claude, ActorKind::Agent));
+    assert_eq!(all[1].agent_model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(all[1].controller_actor_id, Some(alice));
+}
+
+#[tokio::test]
+async fn suggestion_content_reads_base_and_proposed() {
+    let fs = fixture().await;
+    let dan = fs.create_human("Dan", None).await.unwrap();
+    let claude = fs.create_agent("claude", "opus", None).await.unwrap();
+    let sd = fs.create_session(dan, None).await.unwrap();
+    let sc = fs.create_session(claude, None).await.unwrap();
+
+    fs.write_as(WriteCtx::session(dan, sd), "/doc.md", b"one\ntwo\n")
+        .await
+        .unwrap();
+    let id = fs
+        .suggest(
+            WriteCtx::session(claude, sc),
+            "/doc.md",
+            b"one\ntwo\nthree\n",
+            Some("add a line"),
+        )
+        .await
+        .unwrap();
+
+    // The proposed content is readable straight from the store — no app-side stash.
+    let c = fs.suggestion_content(id).await.unwrap();
+    assert_eq!(c.base, "one\ntwo\n");
+    assert_eq!(c.proposed.as_deref(), Some("one\ntwo\nthree\n"));
+
+    // A proposed deletion has no proposed content.
+    let del = fs
+        .suggest_delete(WriteCtx::session(claude, sc), "/doc.md", Some("remove it"))
+        .await
+        .unwrap();
+    let cd = fs.suggestion_content(del).await.unwrap();
+    assert_eq!(cd.base, "one\ntwo\n");
+    assert!(cd.proposed.is_none());
+}

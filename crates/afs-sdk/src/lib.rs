@@ -16,8 +16,8 @@ pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, EventSubscription, FileKind, GcStats, Hash,
     Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence, RebuildReport,
-    S3Config, Suggestion, SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit,
-    VerifyingStore, VersioningMode, WriteCtx,
+    S3Config, Suggestion, SuggestionContent, SuggestionInit, SuggestionStatus, TieredStore,
+    ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -470,6 +470,13 @@ impl Workspace {
         self.fs.actor_by_subject(subject).await
     }
 
+    /// Every registered actor, oldest first. Use this to resolve the bare
+    /// `actor_id` carried by events, suggestions (`resolved_by` too), and
+    /// presence to a name + kind — no app-side actor directory needed.
+    pub async fn list_actors(&self) -> Result<Vec<Actor>> {
+        self.fs.list_actors().await
+    }
+
     /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
     /// returns the existing actor for that subject, or creates one. Race-safe, so
     /// you don't need to keep a user→actor side table.
@@ -542,6 +549,13 @@ impl Workspace {
     /// Render a suggestion as a unified line diff (`base` → `proposed`).
     pub async fn suggestion_diff(&self, id: i64) -> Result<String> {
         self.fs.suggestion_diff(id).await
+    }
+
+    /// A suggestion's base and proposed **content** (read from the store), so a
+    /// reviewer UI can render an inline diff without stashing the proposed bytes
+    /// itself. `proposed` is `None` when the suggestion proposes a deletion.
+    pub async fn suggestion_content(&self, id: i64) -> Result<SuggestionContent> {
+        self.fs.suggestion_content(id).await
     }
 
     /// Accept a pending suggestion: apply it (attributed to the original author)

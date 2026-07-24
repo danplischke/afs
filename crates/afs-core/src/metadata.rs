@@ -133,6 +133,10 @@ pub trait MetadataStore: Send + Sync {
     /// Look up an actor by external identity (`auth_subject`). At most one exists
     /// (a partial UNIQUE index enforces it); returns `None` if unregistered.
     async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>>;
+    /// Every registered actor, oldest first. Lets a caller resolve the bare
+    /// `actor_id` carried by events/suggestions/presence to a name+kind without
+    /// having created the actor itself.
+    async fn list_actors(&self) -> Result<Vec<Actor>>;
     async fn create_session(
         &self,
         actor_id: i64,
@@ -347,6 +351,9 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
         (**self).actor_by_subject(subject).await
+    }
+    async fn list_actors(&self) -> Result<Vec<Actor>> {
+        (**self).list_actors().await
     }
     async fn create_session(
         &self,

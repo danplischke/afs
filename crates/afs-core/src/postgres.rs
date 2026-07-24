@@ -730,6 +730,34 @@ impl MetadataStore for PostgresMetadataStore {
         }
     }
 
+    async fn list_actors(&self) -> Result<Vec<Actor>> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT id, kind, display_name, auth_subject, agent_model, agent_vendor, controller_actor_id, created_at
+                 FROM actor ORDER BY id",
+                &[],
+            )
+            .await?;
+        let mut actors = Vec::with_capacity(rows.len());
+        for r in rows {
+            let kind_s: String = r.get(1);
+            let kind = ActorKind::parse(&kind_s)
+                .ok_or_else(|| AfsError::Metadata(format!("bad actor kind {kind_s:?}")))?;
+            actors.push(Actor {
+                id: r.get(0),
+                kind,
+                display_name: r.get(2),
+                auth_subject: r.get(3),
+                agent_model: r.get(4),
+                agent_vendor: r.get(5),
+                controller_actor_id: r.get(6),
+                created_at: r.get(7),
+            });
+        }
+        Ok(actors)
+    }
+
     async fn create_session(
         &self,
         actor_id: i64,

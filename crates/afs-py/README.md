@@ -152,6 +152,10 @@ failed). The DB stays the thing to back up — so also run Postgres PITR / a rep
   own header auth.
 - `examples/fastapi_app.py` — the same surface written out as hand-rolled
   endpoints, if you'd rather own each route.
+- **`examples/web/`** (repo root) — a full-stack **React + PlateJS** editor over
+  this router, showing per-block and per-line **attribution** (blame), version
+  **lineage** (commit history + diffs), and the agent-suggestion review queue,
+  with a live SSE feed. The visual companion to `collab_app.py`.
 
 ## API surface
 
@@ -161,9 +165,10 @@ failed). The DB stays the thing to back up — so also run Postgres PITR / a rep
 `write_as` · `mkdir_p` · `ls` · `stat` · `remove` · `rename` · `commit` · `log` ·
 `status` · `diff` · `diff_file` · `create_branch` · `checkout` · `branches` ·
 `current_branch` · `rebuild` · `scan` ·
-`create_human` · `create_agent` · `actor_by_subject` · `find_or_create_human` ·
-`find_or_create_agent` · `create_session` · `blame` ·
+`create_human` · `create_agent` · `actor_by_subject` · `actor` · `list_actors` ·
+`find_or_create_human` · `find_or_create_agent` · `create_session` · `blame` ·
 `watch` · `subscribe` · `presence` · `touch` · `suggest` · `suggest_delete` ·
 `list_suggestions` ·
-`get_suggestion` · `suggestion_diff` · `accept_suggestion` · `reject_suggestion` ·
+`get_suggestion` · `suggestion_diff` · `suggestion_content` · `accept_suggestion` ·
+`reject_suggestion` ·
 `mount` · `serve_nfs`. Plus `WriteCtx`, `S3Config`, `Mount`, `fuse_mountable()`.

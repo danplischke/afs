@@ -279,11 +279,17 @@ Content addressing means a chunk's identity is its BLAKE3 hash, so dedup,
 versioning, and integrity hold no matter where bytes live.
 
 - **Local** — a sharded content-addressed directory. `Workspace::open_local`.
-- **Object storage (S3/R2/GCS)** — `Workspace::open_s3`. Content-defined chunking
-  keeps edits cheap (only changed chunks re-upload), and a **pack layer**
-  (`open_s3_packed`) batches chunks into large pack objects so you make a few big
-  PUTs instead of thousands of tiny ones, with a small local index for single
-  ranged-GET reads. `repack()` reclaims space from deleted chunks.
+- **Object storage** — Content-defined chunking keeps edits cheap (only changed
+  chunks re-upload), and a **pack layer** (`open_s3_packed` / `open_gcs_packed`)
+  batches chunks into large pack objects so you make a few big PUTs instead of
+  thousands of tiny ones, with a small local index for single ranged-GET reads.
+  `repack()` reclaims space from deleted chunks. Two flavours:
+  - **S3 / R2 / MinIO** (and GCS via its S3-interop API with HMAC keys) —
+    `Workspace::open_s3`.
+  - **Google Cloud Storage, natively** — `Workspace::open_gcs`, over GCS's JSON
+    API with OAuth2: a service-account key/file, Application Default Credentials
+    (`GOOGLE_APPLICATION_CREDENTIALS` / `gcloud`), or GKE workload identity — no
+    HMAC keys needed.
 - **Encryption at rest** — wrap any backend so content is encrypted
   (XChaCha20-Poly1305) before it touches disk or the network, transparently to
   the engine. The address stays the plaintext hash, so **dedup still works**

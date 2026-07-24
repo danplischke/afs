@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
-    DirEntry, EditOp, EncryptedStore, Event, EventInit, EventSubscription, FileKind, GcStats, Hash,
-    Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence, RebuildReport,
-    S3Config, Suggestion, SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit,
-    VerifyingStore, VersioningMode, WriteCtx,
+    DirEntry, EditOp, EncryptedStore, Event, EventInit, EventSubscription, FileKind, GcStats,
+    GcsConfig, Hash, Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence,
+    RebuildReport, S3Config, Suggestion, SuggestionContent, SuggestionInit, SuggestionStatus,
+    TieredStore, ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 pub use futures::stream::BoxStream;
@@ -152,6 +152,62 @@ impl Workspace {
     ) -> Result<Self> {
         let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
         let data: Content = Arc::new(ObjectContentStore::s3(cfg)?);
+        let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(PackStore::new(data, index))));
+        let mut ws = Self::open(pg.clone(), content).await?;
+        ws.pg = Some(pg);
+        Ok(ws)
+    }
+
+    /// SQLite metadata + a **native** GCS object store for content (GCS JSON API +
+    /// OAuth2, so service-account / ADC / workload-identity credentials work; see
+    /// [`GcsConfig`]). Reads are integrity-verified (a bit-rotted object surfaces
+    /// as `Corrupt` rather than being served as authentic).
+    pub async fn open_gcs(db_path: impl AsRef<Path>, cfg: GcsConfig) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::gcs(cfg)?)));
+        Self::open(meta, content).await
+    }
+
+    /// SQLite metadata + a **packed** native GCS object store (few large PUTs
+    /// instead of many tiny ones), with the per-chunk index under `index_dir`. The
+    /// recommended object-storage layout; seal the open pack with [`Workspace::flush`]
+    /// (or `commit`) and reclaim deleted space with [`Workspace::repack`].
+    pub async fn open_gcs_packed(
+        db_path: impl AsRef<Path>,
+        cfg: GcsConfig,
+        index_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        let data: Content = Arc::new(ObjectContentStore::gcs(cfg)?);
+        let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(PackStore::new(data, index))));
+        Self::open(meta, content).await
+    }
+
+    /// Postgres metadata (multi-writer) + a **native** GCS object store — the
+    /// production pairing for a shared human+agent workspace on Google Cloud: many
+    /// writers on one database, one shared content store. Reads are integrity-
+    /// verified (a bit-rotted object surfaces as `Corrupt`, not as authentic).
+    pub async fn open_pg_gcs(dsn: &str, cfg: GcsConfig) -> Result<Self> {
+        let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::gcs(cfg)?)));
+        let mut ws = Self::open(pg.clone(), content).await?;
+        ws.pg = Some(pg);
+        Ok(ws)
+    }
+
+    /// Postgres metadata + a **packed** native GCS object store, with the per-chunk
+    /// index in a local directory. The recommended object-storage layout for a team
+    /// on Google Cloud; seal the open pack with [`Workspace::flush`] (or `commit`)
+    /// and reclaim deleted space with [`Workspace::repack`].
+    pub async fn open_pg_gcs_packed(
+        dsn: &str,
+        cfg: GcsConfig,
+        index_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
+        let data: Content = Arc::new(ObjectContentStore::gcs(cfg)?);
         let index: Content = Arc::new(LocalCasStore::open(index_dir).await?);
         let content: Content = Arc::new(VerifyingStore::new(Arc::new(PackStore::new(data, index))));
         let mut ws = Self::open(pg.clone(), content).await?;
@@ -488,6 +544,13 @@ impl Workspace {
         self.fs.actor_by_subject(subject).await
     }
 
+    /// Every registered actor, oldest first. Use this to resolve the bare
+    /// `actor_id` carried by events, suggestions (`resolved_by` too), and
+    /// presence to a name + kind — no app-side actor directory needed.
+    pub async fn list_actors(&self) -> Result<Vec<Actor>> {
+        self.fs.list_actors().await
+    }
+
     /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
     /// returns the existing actor for that subject, or creates one. Race-safe, so
     /// you don't need to keep a user→actor side table.
@@ -560,6 +623,13 @@ impl Workspace {
     /// Render a suggestion as a unified line diff (`base` → `proposed`).
     pub async fn suggestion_diff(&self, id: i64) -> Result<String> {
         self.fs.suggestion_diff(id).await
+    }
+
+    /// A suggestion's base and proposed **content** (read from the store), so a
+    /// reviewer UI can render an inline diff without stashing the proposed bytes
+    /// itself. `proposed` is `None` when the suggestion proposes a deletion.
+    pub async fn suggestion_content(&self, id: i64) -> Result<SuggestionContent> {
+        self.fs.suggestion_content(id).await
     }
 
     /// Accept a pending suggestion: apply it (attributed to the original author)

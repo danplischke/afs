@@ -31,6 +31,17 @@ def test_s3config_constructs_and_hides_secrets():
     assert "super-secret" not in r and "AKIA" not in r  # never leak credentials
 
 
+def test_gcsconfig_constructs_and_hides_secrets():
+    cfg = afs.GcsConfig(
+        bucket="my-bucket",
+        service_account_key='{"private_key":"SENSITIVE-KEY","client_email":"x@y.iam"}',
+        prefix="afs",
+    )
+    r = repr(cfg)
+    assert "my-bucket" in r
+    assert "SENSITIVE-KEY" not in r  # never leak credentials
+
+
 def test_object_store_roundtrip_and_attribution():
     async def _exercise():
         d = tempfile.mkdtemp()

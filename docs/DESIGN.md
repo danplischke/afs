@@ -162,8 +162,10 @@ trait ContentStore {
 ```
 
 Backends: **`InlineStore`** (chunk bytes in a `content_inline` DB table, for tiny objects), **`LocalCasStore`**
-(`objects/aa/bbbb…` sharded dir), **`S3Store`** (S3/R2/GCS/MinIO; chunk hash → object key; multipart upload for
-large chunks; `GetObject` with `Range` for `get_range`). "Remote filesystem" is just `S3Store`/`LocalCasStore`
+(`objects/aa/bbbb…` sharded dir), **`S3Store`** (S3/R2/MinIO, plus GCS — either via S3-interop with HMAC keys or
+natively via the GCS JSON API with OAuth2/service-account/ADC/workload-identity; chunk hash → object key; a **pack
+layer** batches many small chunks into large objects rather than using S3 multipart; `GetObject` with `Range` for
+`get_range`). "Remote filesystem" is just `S3Store`/`LocalCasStore`
 pointed at a network target. A `TieredStore` composes a fast local **cache tier** (LRU on disk) in front of a
 remote backend, with read-through, write-back batching, and **prefetch** of a manifest's chunks on open.
 
@@ -568,8 +570,9 @@ each write is, and a storage engine that agents point at untrusted code and untr
   `bazil.org/fuse`) if team familiarity dominates — but we lose the single-core-shared-with-bindings advantage.
 - **Metadata:** `sqlx` (compile-time-checked, supports Postgres + SQLite), `deadpool` pooling, `refinery`
   migrations. Postgres 15+.
-- **Content:** `object_store` (works with S3/R2/GCS/MinIO), `blake3`, a FastCDC crate, `zstd`,
-  `chacha20poly1305` (XChaCha20 AEAD) + `argon2` (passphrase KDF).
+- **Content:** the `object_store` crate (S3/R2/MinIO + GCS-interop via its `aws` feature; native GCS via its
+  `gcp` feature), `blake3`, a FastCDC crate, `zstd`, `chacha20poly1305` (XChaCha20 AEAD) + `argon2`
+  (passphrase KDF).
 - **Access:** `fuser` (FUSE), an NFSv4 server crate or `nfs-rs` for macOS, `rmcp`/an MCP server crate, `axum` +
   `tonic` for HTTP/gRPC, `yrs` (Yjs in Rust) for opt-in CRDT co-editing.
 

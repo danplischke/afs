@@ -47,10 +47,10 @@ pub use objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, RefSnapshot, Tree, TreeEntry, TreeKind,
     VersioningMode,
 };
-pub use objectstore::{ObjectContentStore, S3Config};
+pub use objectstore::{GcsConfig, ObjectContentStore, S3Config};
 pub use pack::{DEFAULT_PACK_SIZE, PackStore};
 pub use postgres::{EventSubscription, PostgresMetadataStore};
 pub use recover::RebuildReport;
 pub use sqlite::SqliteMetadataStore;
-pub use suggest::{Suggestion, SuggestionInit, SuggestionStatus};
+pub use suggest::{Suggestion, SuggestionContent, SuggestionInit, SuggestionStatus};
 pub use types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};

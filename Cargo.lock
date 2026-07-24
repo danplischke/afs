@@ -19,150 +19,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "afs-api"
-version = "0.0.0"
-dependencies = [
- "afs-sdk",
- "async-trait",
- "axum",
- "http-body-util",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "afs-cli"
-version = "0.1.0"
-dependencies = [
- "afs-api",
- "afs-fuse",
- "afs-git",
- "afs-mcp",
- "afs-nfs",
- "afs-sandbox",
- "afs-sdk",
- "anyhow",
- "clap",
- "tokio",
-]
-
-[[package]]
-name = "afs-core"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-recursion",
- "async-trait",
- "blake3",
- "bytes",
- "chacha20poly1305",
- "criterion",
- "deadpool-postgres",
- "diffy",
- "fastcdc",
- "futures",
- "hex",
- "object_store",
- "parking_lot",
- "rusqlite",
- "similar",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-postgres",
-]
-
-[[package]]
-name = "afs-fuse"
-version = "0.0.0"
-dependencies = [
- "afs-sdk",
- "fuser",
- "libc",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "afs-git"
-version = "0.0.0"
-dependencies = [
- "afs-core",
- "afs-sdk",
- "anyhow",
- "async-recursion",
- "flate2",
- "hex",
- "libc",
- "sha1",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "afs-mcp"
-version = "0.0.0"
-dependencies = [
- "afs-sdk",
- "anyhow",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "afs-nfs"
-version = "0.0.0"
-dependencies = [
- "afs-sdk",
- "async-trait",
- "nfsserve",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "afs-py"
-version = "0.0.0"
-dependencies = [
- "afs-core",
- "afs-fuse",
- "afs-nfs",
- "afs-sdk",
- "fuser",
- "pyo3",
- "pyo3-async-runtimes",
- "tokio",
-]
-
-[[package]]
-name = "afs-sandbox"
-version = "0.0.0"
-dependencies = [
- "afs-sdk",
- "anyhow",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "afs-sdk"
-version = "0.1.0"
-dependencies = [
- "afs-core",
- "bytes",
- "futures",
- "getrandom 0.2.17",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1808,6 +1664,150 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "origo-api"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http-body-util",
+ "origo-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "origo-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "origo-api",
+ "origo-fuse",
+ "origo-git",
+ "origo-mcp",
+ "origo-nfs",
+ "origo-sandbox",
+ "origo-sdk",
+ "tokio",
+]
+
+[[package]]
+name = "origo-core"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-recursion",
+ "async-trait",
+ "blake3",
+ "bytes",
+ "chacha20poly1305",
+ "criterion",
+ "deadpool-postgres",
+ "diffy",
+ "fastcdc",
+ "futures",
+ "hex",
+ "object_store",
+ "parking_lot",
+ "rusqlite",
+ "similar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "origo-fuse"
+version = "0.0.0"
+dependencies = [
+ "fuser",
+ "libc",
+ "origo-sdk",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "origo-git"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-recursion",
+ "flate2",
+ "hex",
+ "libc",
+ "origo-core",
+ "origo-sdk",
+ "sha1",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "origo-mcp"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "origo-sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "origo-nfs"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "nfsserve",
+ "origo-sdk",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "origo-py"
+version = "0.0.0"
+dependencies = [
+ "fuser",
+ "origo-core",
+ "origo-fuse",
+ "origo-nfs",
+ "origo-sdk",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "tokio",
+]
+
+[[package]]
+name = "origo-sandbox"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "origo-sdk",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "origo-sdk"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "getrandom 0.2.17",
+ "origo-core",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "page_size"

@@ -173,8 +173,14 @@ async fn blame_survives_checkout() {
     // main (v2): alice on 1-2, claude on 3.
     let b = fs.blame("/f").await.unwrap();
     assert_eq!(b.len(), 2);
-    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
-    assert_eq!((b[1].actor.id, b[1].line_start, b[1].line_end), (claude, 3, 3));
+    assert_eq!(
+        (b[0].actor.id, b[0].line_start, b[0].line_end),
+        (alice, 1, 2)
+    );
+    assert_eq!(
+        (b[1].actor.id, b[1].line_start, b[1].line_end),
+        (claude, 3, 3)
+    );
 
     // Checkout dev (v1): the working tree is two lines again, and blame follows
     // the checked-out content — all alice, no stale `claude`/past-EOF run.
@@ -182,15 +188,24 @@ async fn blame_survives_checkout() {
     assert_eq!(&fs.read("/f").await.unwrap()[..], b"one\ntwo\n");
     let b = fs.blame("/f").await.unwrap();
     assert_eq!(b.len(), 1);
-    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
+    assert_eq!(
+        (b[0].actor.id, b[0].line_start, b[0].line_end),
+        (alice, 1, 2)
+    );
 
     // Back to main (v2): blame is exactly what it was before we left.
     fs.checkout("main").await.unwrap();
     assert_eq!(&fs.read("/f").await.unwrap()[..], b"one\ntwo\nthree\n");
     let b = fs.blame("/f").await.unwrap();
     assert_eq!(b.len(), 2);
-    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
-    assert_eq!((b[1].actor.id, b[1].line_start, b[1].line_end), (claude, 3, 3));
+    assert_eq!(
+        (b[0].actor.id, b[0].line_start, b[0].line_end),
+        (alice, 1, 2)
+    );
+    assert_eq!(
+        (b[1].actor.id, b[1].line_start, b[1].line_end),
+        (claude, 3, 3)
+    );
 }
 
 // H7: a plain (non-attributed) `write` replaces the content but records no
@@ -208,7 +223,10 @@ async fn unattributed_write_invalidates_blame() {
         .unwrap();
     let b = fs.blame("/f").await.unwrap();
     assert_eq!(b.len(), 1);
-    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (claude, 1, 3));
+    assert_eq!(
+        (b[0].actor.id, b[0].line_start, b[0].line_end),
+        (claude, 1, 3)
+    );
 
     // Someone edits the file outside the attributed path, shrinking it.
     fs.write("/f", b"z\n").await.unwrap();
@@ -225,7 +243,10 @@ async fn unattributed_write_invalidates_blame() {
         .unwrap();
     let b = fs.blame("/f").await.unwrap();
     assert_eq!(b.len(), 1);
-    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (claude, 1, 2));
+    assert_eq!(
+        (b[0].actor.id, b[0].line_start, b[0].line_end),
+        (claude, 1, 2)
+    );
 }
 
 // M10: a pure re-indent is not an authorship change. The whitespace-normalized
@@ -249,7 +270,10 @@ async fn reindent_keeps_original_author() {
 
     let b = fs.blame("/f").await.unwrap();
     assert_eq!(b.len(), 1, "re-indent must not split authorship, got {b:?}");
-    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (alice, 1, 2));
+    assert_eq!(
+        (b[0].actor.id, b[0].line_start, b[0].line_end),
+        (alice, 1, 2)
+    );
 }
 
 // M10: a line that is *moved* carries its author to its new position, rather than
@@ -286,8 +310,14 @@ async fn moved_line_keeps_its_author() {
     let b = fs.blame("/f").await.unwrap();
     // `three` stays claude at its new home; `one`/`two` remain alice.
     assert_eq!(b.len(), 2, "got {b:?}");
-    assert_eq!((b[0].actor.id, b[0].line_start, b[0].line_end), (claude, 1, 1));
-    assert_eq!((b[1].actor.id, b[1].line_start, b[1].line_end), (alice, 2, 3));
+    assert_eq!(
+        (b[0].actor.id, b[0].line_start, b[0].line_end),
+        (claude, 1, 1)
+    );
+    assert_eq!(
+        (b[1].actor.id, b[1].line_start, b[1].line_end),
+        (alice, 2, 3)
+    );
 }
 
 // find_or_create_actor maps an external identity (auth_subject) to exactly one
@@ -301,7 +331,10 @@ async fn find_or_create_actor_is_idempotent_by_subject() {
 
     // First call creates; a second with the same subject returns the same id.
     let a1 = fs.find_or_create_human("user_42", "Dan").await.unwrap();
-    let a2 = fs.find_or_create_human("user_42", "Dan again").await.unwrap();
+    let a2 = fs
+        .find_or_create_human("user_42", "Dan again")
+        .await
+        .unwrap();
     assert_eq!(a1, a2);
 
     // A different subject is a different actor.
@@ -339,4 +372,64 @@ async fn find_or_create_actor_is_idempotent_by_subject() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn actor_lookup_by_id_and_list() {
+    let fs = fixture().await;
+    let alice = fs.create_human("Alice", Some("alice@x")).await.unwrap();
+    let claude = fs
+        .create_agent("claude", "claude-opus-4-8", Some(alice))
+        .await
+        .unwrap();
+
+    // get_actor resolves a bare id (as carried by events/suggestions) to the record.
+    let a = fs.get_actor(alice).await.unwrap().expect("alice exists");
+    assert_eq!((a.id, a.kind), (alice, ActorKind::Human));
+    assert_eq!(a.display_name, "Alice");
+    assert!(fs.get_actor(9999).await.unwrap().is_none());
+
+    // list_actors returns everyone, oldest first, with kind/model/controller.
+    let all = fs.list_actors().await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].id, alice);
+    assert_eq!((all[1].id, all[1].kind), (claude, ActorKind::Agent));
+    assert_eq!(all[1].agent_model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(all[1].controller_actor_id, Some(alice));
+}
+
+#[tokio::test]
+async fn suggestion_content_reads_base_and_proposed() {
+    let fs = fixture().await;
+    let dan = fs.create_human("Dan", None).await.unwrap();
+    let claude = fs.create_agent("claude", "opus", None).await.unwrap();
+    let sd = fs.create_session(dan, None).await.unwrap();
+    let sc = fs.create_session(claude, None).await.unwrap();
+
+    fs.write_as(WriteCtx::session(dan, sd), "/doc.md", b"one\ntwo\n")
+        .await
+        .unwrap();
+    let id = fs
+        .suggest(
+            WriteCtx::session(claude, sc),
+            "/doc.md",
+            b"one\ntwo\nthree\n",
+            Some("add a line"),
+        )
+        .await
+        .unwrap();
+
+    // The proposed content is readable straight from the store — no app-side stash.
+    let c = fs.suggestion_content(id).await.unwrap();
+    assert_eq!(c.base, "one\ntwo\n");
+    assert_eq!(c.proposed.as_deref(), Some("one\ntwo\nthree\n"));
+
+    // A proposed deletion has no proposed content.
+    let del = fs
+        .suggest_delete(WriteCtx::session(claude, sc), "/doc.md", Some("remove it"))
+        .await
+        .unwrap();
+    let cd = fs.suggestion_content(del).await.unwrap();
+    assert_eq!(cd.base, "one\ntwo\n");
+    assert!(cd.proposed.is_none());
 }

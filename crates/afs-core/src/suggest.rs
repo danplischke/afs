@@ -86,6 +86,16 @@ pub struct Suggestion {
     pub resolved_by: Option<i64>,
 }
 
+/// A suggestion's **content** (not just a diff): the text at the proposal's base
+/// and the proposed text. Lets a caller render an inline review straight from the
+/// store, instead of stashing the proposed bytes app-side. `proposed` is `None`
+/// when the suggestion proposes a deletion.
+#[derive(Clone, Debug)]
+pub struct SuggestionContent {
+    pub base: String,
+    pub proposed: Option<String>,
+}
+
 impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
     /// Propose an edit to `path` without applying it. The bytes are stored in
     /// the CAS now; the working tree is untouched until the suggestion is
@@ -212,11 +222,28 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
         Ok(diffy::create_patch(&old, &new).to_string())
     }
 
+    /// A suggestion's base and proposed **content**, read from the store — so a
+    /// reviewer UI can render an inline diff without the app stashing the proposed
+    /// bytes itself. `proposed` is `None` when the suggestion proposes a deletion.
+    pub async fn suggestion_content(&self, id: i64) -> Result<SuggestionContent> {
+        let s = self
+            .meta
+            .get_suggestion(id)
+            .await?
+            .ok_or_else(|| AfsError::NotFound(format!("suggestion #{id}")))?;
+        let base = self.hex_to_text(s.base_hash.as_deref()).await?;
+        let proposed = match s.proposed_hash.as_deref() {
+            Some(h) => Some(self.hex_to_text(Some(h)).await?),
+            None => None,
+        };
+        Ok(SuggestionContent { base, proposed })
+    }
+
     async fn hex_to_text(&self, hex: Option<&str>) -> Result<String> {
         match hex {
             Some(h) => {
-                let hash =
-                    Hash::from_hex(h).ok_or_else(|| AfsError::Metadata("bad content hash".into()))?;
+                let hash = Hash::from_hex(h)
+                    .ok_or_else(|| AfsError::Metadata("bad content hash".into()))?;
                 let bytes = self.content_bytes(&hash).await?;
                 Ok(String::from_utf8_lossy(&bytes).into_owned())
             }
@@ -266,21 +293,38 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
             session: s.session_id,
             tool_call: None,
         };
+        // The base the proposal was diffed against, as the CAS expectation below.
+        let expected_base = match &s.base_hash {
+            Some(hex) => Some(
+                Hash::from_hex(hex).ok_or_else(|| AfsError::Metadata("bad base hash".into()))?,
+            ),
+            None => None,
+        };
         match &s.proposed_hash {
             Some(hex) => {
                 let hash = Hash::from_hex(hex)
                     .ok_or_else(|| AfsError::Metadata("bad proposed hash".into()))?;
                 let bytes = self.content_bytes(&hash).await?;
-                self.write_as(author, &s.path, &bytes).await?;
+                // Apply atomically: the write only lands if the file is *still* at
+                // the base it was proposed against, so a change that slipped in
+                // after the staleness check above can't be silently clobbered.
+                self.write_as_expecting(author, &s.path, &bytes, expected_base)
+                    .await?;
             }
             None => {
-                // Proposed deletion.
+                // Proposed deletion. (The staleness pre-check above guards it; a
+                // conditional delete would close its narrower remaining window.)
                 self.remove(&s.path).await?;
             }
         }
 
         self.meta
-            .resolve_suggestion(id, SuggestionStatus::Accepted, Some(approver.actor), now_secs())
+            .resolve_suggestion(
+                id,
+                SuggestionStatus::Accepted,
+                Some(approver.actor),
+                now_secs(),
+            )
             .await?;
         self.record_event(EventInit {
             actor_id: Some(approver.actor),
@@ -308,7 +352,12 @@ impl<M: MetadataStore, C: ContentStore> crate::engine::Fs<M, C> {
             )));
         }
         self.meta
-            .resolve_suggestion(id, SuggestionStatus::Rejected, Some(approver.actor), now_secs())
+            .resolve_suggestion(
+                id,
+                SuggestionStatus::Rejected,
+                Some(approver.actor),
+                now_secs(),
+            )
             .await?;
         self.record_event(EventInit {
             actor_id: Some(approver.actor),

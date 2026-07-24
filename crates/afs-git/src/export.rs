@@ -99,9 +99,7 @@ fn init_git_dir(git_dir: &Path, fmt: ObjectFormat, branch: &str) -> Result<()> {
     std::fs::create_dir_all(git_dir.join("refs").join("heads"))?;
     std::fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
     let config = match fmt {
-        ObjectFormat::Sha1 => {
-            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n".to_string()
-        }
+        ObjectFormat::Sha1 => "[core]\n\trepositoryformatversion = 0\n\tbare = false\n".to_string(),
         ObjectFormat::Sha256 => concat!(
             "[core]\n\trepositoryformatversion = 1\n\tbare = false\n",
             "[extensions]\n\tobjectformat = sha256\n"
@@ -184,8 +182,7 @@ impl Exporter<'_> {
             entries.push(GitTreeEntry {
                 mode,
                 name: e.name.clone(),
-                oid: hex::decode(&oid_hex)
-                    .map_err(|_| AfsError::Content("bad oid".into()))?,
+                oid: hex::decode(&oid_hex).map_err(|_| AfsError::Content("bad oid".into()))?,
             });
         }
         let obj = make_object(self.fmt, "tree", &tree_payload(entries));

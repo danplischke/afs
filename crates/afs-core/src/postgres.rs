@@ -9,11 +9,11 @@
 //! feeds (consumed by the watch API in M8).
 
 use crate::attribution::{Actor, ActorInit, ActorKind, EditOp, EditOpInit, ToolCallInit};
-use crate::collab::{Event, EventInit, Presence, EVENT_CHANNEL};
-use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
+use crate::collab::{EVENT_CHANNEL, Event, EventInit, Presence};
 use crate::error::{AfsError, Result};
 use crate::metadata::{MetaTxn, MetadataStore};
 use crate::migrations::MIGRATIONS;
+use crate::suggest::{Suggestion, SuggestionInit, SuggestionStatus};
 use crate::types::{DirEntry, FileKind, Hash, Ino, Inode, InodeInit};
 use crate::util::now_secs;
 use async_trait::async_trait;
@@ -295,7 +295,10 @@ impl MetadataStore for PostgresMetadataStore {
         .await?;
         for m in MIGRATIONS {
             let applied = tx
-                .query_opt("SELECT 1 FROM schema_meta WHERE version = $1", &[&m.version])
+                .query_opt(
+                    "SELECT 1 FROM schema_meta WHERE version = $1",
+                    &[&m.version],
+                )
                 .await?
                 .is_some();
             if !applied {
@@ -573,6 +576,20 @@ impl MetadataStore for PostgresMetadataStore {
         Ok(())
     }
 
+    async fn bump_counter(&self, key: &str) -> Result<i64> {
+        let c = self.client().await?;
+        // One atomic upsert: create at 1, else increment the stored integer.
+        let row = c
+            .query_one(
+                "INSERT INTO config(key, value) VALUES ($1, '1')
+                 ON CONFLICT (key) DO UPDATE SET value = (config.value::bigint + 1)::text
+                 RETURNING value::bigint",
+                &[&key],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
     async fn truncate_tree(&self) -> Result<()> {
         let c = self.client().await?;
         // Blame is keyed by content hash (blob_blame), not by inode, so it is
@@ -711,6 +728,34 @@ impl MetadataStore for PostgresMetadataStore {
             Some(id) => self.get_actor(id).await,
             None => Ok(None),
         }
+    }
+
+    async fn list_actors(&self) -> Result<Vec<Actor>> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT id, kind, display_name, auth_subject, agent_model, agent_vendor, controller_actor_id, created_at
+                 FROM actor ORDER BY id",
+                &[],
+            )
+            .await?;
+        let mut actors = Vec::with_capacity(rows.len());
+        for r in rows {
+            let kind_s: String = r.get(1);
+            let kind = ActorKind::parse(&kind_s)
+                .ok_or_else(|| AfsError::Metadata(format!("bad actor kind {kind_s:?}")))?;
+            actors.push(Actor {
+                id: r.get(0),
+                kind,
+                display_name: r.get(2),
+                auth_subject: r.get(3),
+                agent_model: r.get(4),
+                agent_vendor: r.get(5),
+                controller_actor_id: r.get(6),
+                created_at: r.get(7),
+            });
+        }
+        Ok(actors)
     }
 
     async fn create_session(
@@ -1039,9 +1084,36 @@ impl MetaTxn for PostgresTxn {
         Ok(())
     }
 
+    async fn set_content_if(
+        &mut self,
+        ino: Ino,
+        expected: Option<&Hash>,
+        content: Option<Hash>,
+        size: u64,
+    ) -> Result<bool> {
+        let new_hex = content.map(|h| h.to_hex());
+        let expected_hex = expected.map(|h| h.to_hex());
+        let size = size as i64;
+        let now = now_secs();
+        // `IS NOT DISTINCT FROM` is Postgres's null-safe equality (matches a NULL
+        // current content too).
+        let n = self
+            .conn()
+            .execute(
+                "UPDATE inode SET content_hash = $1, size = $2, mtime = $3, ctime = $3
+                 WHERE ino = $4 AND content_hash IS NOT DISTINCT FROM $5",
+                &[&new_hex, &size, &now, &ino, &expected_hex],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()> {
         self.conn()
-            .execute("UPDATE inode SET nlink = $1 WHERE ino = $2", &[&nlink, &ino])
+            .execute(
+                "UPDATE inode SET nlink = $1 WHERE ino = $2",
+                &[&nlink, &ino],
+            )
             .await?;
         Ok(())
     }
@@ -1118,6 +1190,17 @@ impl MetaTxn for PostgresTxn {
             )
             .await?;
         Ok(row.get(0))
+    }
+
+    async fn truncate_tree(&mut self) -> Result<()> {
+        // Same as MetadataStore::truncate_tree, staged in this transaction.
+        self.conn()
+            .batch_execute(
+                "DELETE FROM dentry; DELETE FROM symlink;
+                 DELETE FROM inode WHERE ino <> 1;",
+            )
+            .await?;
+        Ok(())
     }
 
     async fn commit(mut self: Box<Self>) -> Result<()> {

@@ -22,7 +22,7 @@ use crate::error::Result;
 use crate::metadata::MetadataStore;
 use crate::objectgraph::TreeKind;
 use crate::suggest::SuggestionStatus;
-use crate::types::{FileKind, Hash, Ino, INO_ROOT};
+use crate::types::{FileKind, Hash, INO_ROOT, Ino};
 use async_recursion::async_recursion;
 use std::collections::HashSet;
 

@@ -110,7 +110,11 @@ fn commit_dict(py: Python<'_>, c: &CommitInfo) -> PyResult<Py<PyAny>> {
     d.set_item("timestamp", c.commit.timestamp)?;
     d.set_item(
         "parents",
-        c.commit.parents.iter().map(|h| h.to_hex()).collect::<Vec<_>>(),
+        c.commit
+            .parents
+            .iter()
+            .map(|h| h.to_hex())
+            .collect::<Vec<_>>(),
     )?;
     Ok(d.into_any().unbind())
 }
@@ -422,7 +426,11 @@ impl Mount {
     }
 
     fn __repr__(&self) -> String {
-        let state = if self.session.is_some() { "mounted" } else { "unmounted" };
+        let state = if self.session.is_some() {
+            "mounted"
+        } else {
+            "unmounted"
+        };
         format!("Mount(mountpoint={:?}, {state})", self.mountpoint)
     }
 }
@@ -474,11 +482,7 @@ impl Workspace {
     /// Open a workspace with Postgres metadata (multi-writer) over a local CAS.
     /// `dsn` is a libpq URL/DSN, e.g. `postgres://user:pass@host/db`.
     #[staticmethod]
-    fn open_pg<'py>(
-        py: Python<'py>,
-        dsn: String,
-        cas_dir: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn open_pg<'py>(py: Python<'py>, dsn: String, cas_dir: String) -> PyResult<Bound<'py, PyAny>> {
         future_into_py(py, async move {
             let content = Arc::new(LocalCasStore::open(&cas_dir).await.map_err(to_pyerr)?);
             // Via the SDK constructor so the workspace retains its Postgres handle
@@ -528,11 +532,7 @@ impl Workspace {
     /// production pairing for a shared human+agent workspace: many writers on one
     /// database, one shared content store.
     #[staticmethod]
-    fn open_pg_s3<'py>(
-        py: Python<'py>,
-        dsn: String,
-        cfg: S3Config,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn open_pg_s3<'py>(py: Python<'py>, dsn: String, cfg: S3Config) -> PyResult<Bound<'py, PyAny>> {
         future_into_py(py, async move {
             let ws = CoreWorkspace::open_pg_s3(&dsn, cfg.inner)
                 .await
@@ -632,10 +632,7 @@ impl Workspace {
     /// adapter as `open_s3` minus the network, for local dev and tests without a
     /// live bucket. Content is not durable.
     #[staticmethod]
-    fn open_object_memory<'py>(
-        py: Python<'py>,
-        db_path: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn open_object_memory<'py>(py: Python<'py>, db_path: String) -> PyResult<Bound<'py, PyAny>> {
         future_into_py(py, async move {
             let ws = CoreWorkspace::open_object_memory(&db_path)
                 .await
@@ -762,7 +759,11 @@ impl Workspace {
         let ws = self.inner.clone();
         future_into_py(py, async move {
             let log = ws.log().await.map_err(to_pyerr)?;
-            Python::attach(|py| log.iter().map(|c| commit_dict(py, c)).collect::<PyResult<Vec<_>>>())
+            Python::attach(|py| {
+                log.iter()
+                    .map(|c| commit_dict(py, c))
+                    .collect::<PyResult<Vec<_>>>()
+            })
         })
     }
 
@@ -771,21 +772,26 @@ impl Workspace {
         let ws = self.inner.clone();
         future_into_py(py, async move {
             let changes = ws.status().await.map_err(to_pyerr)?;
-            Python::attach(|py| changes.iter().map(|d| diff_dict(py, d)).collect::<PyResult<Vec<_>>>())
+            Python::attach(|py| {
+                changes
+                    .iter()
+                    .map(|d| diff_dict(py, d))
+                    .collect::<PyResult<Vec<_>>>()
+            })
         })
     }
 
     /// Changed paths between two refs/commits (`from` -> `to`).
-    fn diff<'py>(
-        &self,
-        py: Python<'py>,
-        from: String,
-        to: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn diff<'py>(&self, py: Python<'py>, from: String, to: String) -> PyResult<Bound<'py, PyAny>> {
         let ws = self.inner.clone();
         future_into_py(py, async move {
             let changes = ws.diff(&from, &to).await.map_err(to_pyerr)?;
-            Python::attach(|py| changes.iter().map(|d| diff_dict(py, d)).collect::<PyResult<Vec<_>>>())
+            Python::attach(|py| {
+                changes
+                    .iter()
+                    .map(|d| diff_dict(py, d))
+                    .collect::<PyResult<Vec<_>>>()
+            })
         })
     }
 
@@ -917,13 +923,45 @@ impl Workspace {
     /// Look up an actor by external identity (`auth_subject`); returns a dict or
     /// `None`. Use this (or `find_or_create_*`) to map your app's user id to an
     /// afs actor without keeping a side table.
-    fn actor_by_subject<'py>(&self, py: Python<'py>, subject: String) -> PyResult<Bound<'py, PyAny>> {
+    fn actor_by_subject<'py>(
+        &self,
+        py: Python<'py>,
+        subject: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let ws = self.inner.clone();
         future_into_py(py, async move {
             let found = ws.actor_by_subject(&subject).await.map_err(to_pyerr)?;
             Python::attach(|py| match found {
                 Some(a) => Ok(Some(actor_dict(py, &a)?)),
                 None => Ok(None),
+            })
+        })
+    }
+
+    /// Look up an actor by its numeric id, or `None`. Resolves the bare
+    /// `actor_id` carried by events/suggestions/presence to a full actor dict.
+    fn actor<'py>(&self, py: Python<'py>, id: i64) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let found = ws.get_actor(id).await.map_err(to_pyerr)?;
+            Python::attach(|py| match found {
+                Some(a) => Ok(Some(actor_dict(py, &a)?)),
+                None => Ok(None),
+            })
+        })
+    }
+
+    /// Every registered actor (oldest first). Handy to build a client-side
+    /// directory that resolves the `actor_id` in events/suggestions to a name.
+    fn list_actors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let actors = ws.list_actors().await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                actors
+                    .iter()
+                    .map(|a| actor_dict(py, a))
+                    .collect::<PyResult<Vec<_>>>()
             })
         })
     }
@@ -985,7 +1023,12 @@ impl Workspace {
         let ws = self.inner.clone();
         future_into_py(py, async move {
             let ranges = ws.blame(&path).await.map_err(to_pyerr)?;
-            Python::attach(|py| ranges.iter().map(|b| blame_dict(py, b)).collect::<PyResult<Vec<_>>>())
+            Python::attach(|py| {
+                ranges
+                    .iter()
+                    .map(|b| blame_dict(py, b))
+                    .collect::<PyResult<Vec<_>>>()
+            })
         })
     }
 
@@ -997,7 +1040,12 @@ impl Workspace {
         let ws = self.inner.clone();
         future_into_py(py, async move {
             let events = ws.watch(after_seq).await.map_err(to_pyerr)?;
-            Python::attach(|py| events.iter().map(|e| event_dict(py, e)).collect::<PyResult<Vec<_>>>())
+            Python::attach(|py| {
+                events
+                    .iter()
+                    .map(|e| event_dict(py, e))
+                    .collect::<PyResult<Vec<_>>>()
+            })
         })
     }
 
@@ -1035,7 +1083,11 @@ impl Workspace {
         let ws = self.inner.clone();
         future_into_py(py, async move {
             let list = ws.presence(window_secs).await.map_err(to_pyerr)?;
-            Python::attach(|py| list.iter().map(|p| presence_dict(py, p)).collect::<PyResult<Vec<_>>>())
+            Python::attach(|py| {
+                list.iter()
+                    .map(|p| presence_dict(py, p))
+                    .collect::<PyResult<Vec<_>>>()
+            })
         })
     }
 
@@ -1121,7 +1173,11 @@ impl Workspace {
                 .list_suggestions(st, path.as_deref())
                 .await
                 .map_err(to_pyerr)?;
-            Python::attach(|py| list.iter().map(|s| suggestion_dict(py, s)).collect::<PyResult<Vec<_>>>())
+            Python::attach(|py| {
+                list.iter()
+                    .map(|s| suggestion_dict(py, s))
+                    .collect::<PyResult<Vec<_>>>()
+            })
         })
     }
 
@@ -1143,6 +1199,23 @@ impl Workspace {
         future_into_py(py, async move {
             let patch = ws.suggestion_diff(id).await.map_err(to_pyerr)?;
             Ok(patch)
+        })
+    }
+
+    /// A suggestion's base and proposed **content**, read from the store — so a
+    /// reviewer UI can render an inline diff without stashing the proposed bytes
+    /// itself. Returns ``{"base": str, "proposed": str | None}`` (``proposed`` is
+    /// ``None`` when the suggestion proposes a deletion).
+    fn suggestion_content<'py>(&self, py: Python<'py>, id: i64) -> PyResult<Bound<'py, PyAny>> {
+        let ws = self.inner.clone();
+        future_into_py(py, async move {
+            let c = ws.suggestion_content(id).await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                let d = PyDict::new(py);
+                d.set_item("base", c.base)?;
+                d.set_item("proposed", c.proposed)?;
+                Ok(d.into_any().unbind())
+            })
         })
     }
 

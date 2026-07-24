@@ -83,7 +83,9 @@ impl Importer<'_> {
         }
         let (kind, payload) = read_loose(&self.git_dir, oid_hex)?;
         if kind != "commit" {
-            return Err(AfsError::Content(format!("{oid_hex} is a {kind}, not a commit")));
+            return Err(AfsError::Content(format!(
+                "{oid_hex} is a {kind}, not a commit"
+            )));
         }
         let parsed = parse_commit(&payload)?;
 
@@ -112,7 +114,9 @@ impl Importer<'_> {
         }
         let (kind, payload) = read_loose(&self.git_dir, oid_hex)?;
         if kind != "tree" {
-            return Err(AfsError::Content(format!("{oid_hex} is a {kind}, not a tree")));
+            return Err(AfsError::Content(format!(
+                "{oid_hex} is a {kind}, not a tree"
+            )));
         }
         let mut entries = Vec::new();
         for e in parse_tree(&payload, self.fmt)? {
@@ -157,7 +161,9 @@ impl Importer<'_> {
     fn read_blob(&self, oid_hex: &str) -> Result<Vec<u8>> {
         let (kind, payload) = read_loose(&self.git_dir, oid_hex)?;
         if kind != "blob" {
-            return Err(AfsError::Content(format!("{oid_hex} is a {kind}, not a blob")));
+            return Err(AfsError::Content(format!(
+                "{oid_hex} is a {kind}, not a blob"
+            )));
         }
         if let Some(lfs_oid) = lfs_pointer_oid(&payload) {
             let path = self
@@ -218,11 +224,15 @@ mod tests {
             "../../../../etc/passwd",
             "x",
             "..",
-            &"g".repeat(64),        // non-hex
-            &"a".repeat(63),        // wrong length
+            &"g".repeat(64), // non-hex
+            &"a".repeat(63), // wrong length
             "a/b",
         ] {
-            assert_eq!(lfs_pointer_oid(&ptr(bad)), None, "oid {bad:?} must be rejected");
+            assert_eq!(
+                lfs_pointer_oid(&ptr(bad)),
+                None,
+                "oid {bad:?} must be rejected"
+            );
         }
         // not an LFS pointer at all
         assert_eq!(lfs_pointer_oid(b"just a normal blob"), None);

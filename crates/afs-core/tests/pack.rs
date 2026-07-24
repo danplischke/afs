@@ -19,7 +19,11 @@ fn packed(target: usize) -> (PackStore, Arc<MemStore>, Arc<MemStore>) {
 
 fn blob(len: usize, seed: u64) -> Vec<u8> {
     // Distinct seeds must yield distinct bytes; xorshift only needs non-zero state.
-    let mut x = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+    let mut x = if seed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
+    };
     let mut out = Vec::with_capacity(len + 8);
     while out.len() < len {
         x ^= x << 13;
@@ -78,8 +82,14 @@ async fn ranged_read_into_a_pack() {
     let body = blob(1000, 9);
     let h = store.put(&body).await.unwrap();
     store.flush().await.unwrap();
-    assert_eq!(&store.get_range(&h, 10, 5).await.unwrap()[..], &body[10..15]);
-    assert_eq!(&store.get_range(&h, 995, 50).await.unwrap()[..], &body[995..1000]);
+    assert_eq!(
+        &store.get_range(&h, 10, 5).await.unwrap()[..],
+        &body[10..15]
+    );
+    assert_eq!(
+        &store.get_range(&h, 995, 50).await.unwrap()[..],
+        &body[995..1000]
+    );
 }
 
 #[tokio::test]
@@ -107,7 +117,10 @@ async fn index_survives_a_reopen() {
         index.clone() as Arc<dyn ContentStore>,
     );
     for (i, h) in hashes.iter().enumerate() {
-        assert_eq!(&reopened.get(h).await.unwrap()[..], &blob(500, i as u64)[..]);
+        assert_eq!(
+            &reopened.get(h).await.unwrap()[..],
+            &blob(500, i as u64)[..]
+        );
     }
 }
 
@@ -137,7 +150,10 @@ async fn repack_reclaims_deleted_chunks() {
         assert!(store.get(&h[i]).await.is_err());
     }
     for i in [2usize, 3, 5, 6, 7, 8, 9] {
-        assert_eq!(&store.get(&h[i]).await.unwrap()[..], &blob(1000, i as u64)[..]);
+        assert_eq!(
+            &store.get(&h[i]).await.unwrap()[..],
+            &blob(1000, i as u64)[..]
+        );
     }
 }
 
@@ -169,5 +185,9 @@ async fn engine_writes_land_in_packs() {
         index.len()
     );
     assert!(index.len() > 8, "the big file produced many chunks");
-    assert!(data.len() <= 3, "they packed into a handful of objects: {}", data.len());
+    assert!(
+        data.len() <= 3,
+        "they packed into a handful of objects: {}",
+        data.len()
+    );
 }

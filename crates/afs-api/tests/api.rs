@@ -5,7 +5,7 @@
 //! server pre-provisioned, so attribution is derived from the verified identity —
 //! never from the request. Reads are open.
 
-use afs_api::{router, BearerAuth};
+use afs_api::{router, router_with, ApiOptions, BearerAuth};
 use afs_sdk::Workspace;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -51,7 +51,13 @@ async fn fixture() -> Fixture {
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let body = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, body)
 }
 
@@ -63,6 +69,14 @@ fn as_json(bytes: &[u8]) -> Value {
 
 fn get(uri: &str) -> Request<Body> {
     Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+fn get_as(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
 }
 
 // --- unauthenticated mutation builders (for negative tests) -----------------
@@ -173,7 +187,10 @@ async fn missing_file_is_404_and_dir_read_is_400() {
     let app = &fx.app;
     let (st, body) = send(app, get("/files/nope.txt")).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    assert!(as_json(&body)["error"].as_str().unwrap().contains("not found"));
+    assert!(as_json(&body)["error"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
 
     send(app, post_json_as("/dirs/adir", T_HUMAN, json!({}))).await;
     let (st, _) = send(app, get("/files/adir")).await; // reading a directory
@@ -186,7 +203,11 @@ async fn versioning_over_http() {
     let app = &fx.app;
     send(app, put_as("/files/a.txt", T_HUMAN, b"one")).await;
     // the commit author is the authenticated actor, not a client-supplied field
-    let (st, body) = send(app, post_json_as("/commit", T_HUMAN, json!({"message": "first"}))).await;
+    let (st, body) = send(
+        app,
+        post_json_as("/commit", T_HUMAN, json!({"message": "first"})),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert!(as_json(&body)["hash"].as_str().unwrap().len() >= 12);
 
@@ -217,7 +238,11 @@ async fn suggestion_review_over_http() {
     // agent proposes an edit — attributed to the T_AGENT identity, not a query arg
     let (st, body) = send(
         app,
-        post_bytes_as("/suggestions?path=/notes.txt&summary=fix", T_AGENT, b"one\nTWO\n"),
+        post_bytes_as(
+            "/suggestions?path=/notes.txt&summary=fix",
+            T_AGENT,
+            b"one\nTWO\n",
+        ),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -238,7 +263,11 @@ async fn suggestion_review_over_http() {
     assert!(patch.contains("-two") && patch.contains("+TWO"), "{patch}");
 
     // human accepts -> applied, credited to the T_HUMAN identity
-    let (st, _) = send(app, post_empty_as(&format!("/suggestions/{id}/accept"), T_HUMAN)).await;
+    let (st, _) = send(
+        app,
+        post_empty_as(&format!("/suggestions/{id}/accept"), T_HUMAN),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     let (_st, body) = send(app, get("/files/notes.txt")).await;
     assert_eq!(body, b"one\nTWO\n");
@@ -253,21 +282,45 @@ async fn diff_between_branches_over_http() {
     let app = &fx.app;
     send(app, put_as("/files/edit.txt", T_HUMAN, b"one\ntwo\n")).await;
     send(app, put_as("/files/keep.txt", T_HUMAN, b"same\n")).await;
-    send(app, post_json_as("/commit", T_HUMAN, json!({"message": "base"}))).await;
-    send(app, post_json_as("/branches", T_HUMAN, json!({"name": "feature"}))).await;
-    send(app, post_json_as("/checkout", T_HUMAN, json!({"name": "feature"}))).await;
+    send(
+        app,
+        post_json_as("/commit", T_HUMAN, json!({"message": "base"})),
+    )
+    .await;
+    send(
+        app,
+        post_json_as("/branches", T_HUMAN, json!({"name": "feature"})),
+    )
+    .await;
+    send(
+        app,
+        post_json_as("/checkout", T_HUMAN, json!({"name": "feature"})),
+    )
+    .await;
     send(app, put_as("/files/edit.txt", T_HUMAN, b"one\nTWO\n")).await;
     send(app, put_as("/files/new.txt", T_HUMAN, b"added\n")).await;
-    send(app, post_json_as("/commit", T_HUMAN, json!({"message": "work"}))).await;
+    send(
+        app,
+        post_json_as("/commit", T_HUMAN, json!({"message": "work"})),
+    )
+    .await;
 
     // changed-path list
     let (st, body) = send(app, get("/diff?from=main&to=feature")).await;
     assert_eq!(st, StatusCode::OK);
     let changes = as_json(&body);
     let arr = changes.as_array().unwrap();
-    assert_eq!(arr.len(), 2, "edit.txt modified + new.txt added; keep.txt unchanged");
-    assert!(arr.iter().any(|d| d["path"] == "/edit.txt" && d["status"] == "modified"));
-    assert!(arr.iter().any(|d| d["path"] == "/new.txt" && d["status"] == "added"));
+    assert_eq!(
+        arr.len(),
+        2,
+        "edit.txt modified + new.txt added; keep.txt unchanged"
+    );
+    assert!(arr
+        .iter()
+        .any(|d| d["path"] == "/edit.txt" && d["status"] == "modified"));
+    assert!(arr
+        .iter()
+        .any(|d| d["path"] == "/new.txt" && d["status"] == "added"));
 
     // per-file unified diff
     let (st, body) = send(app, get("/diff/file?from=main&to=feature&path=/edit.txt")).await;
@@ -286,7 +339,11 @@ async fn attributed_write_shows_up_in_blame_and_feed() {
     let app = &fx.app;
 
     // write as the agent — identity comes from the token, not the request
-    let (st, _) = send(app, put_as("/files/notes.txt", T_AGENT, b"line one\nline two\n")).await;
+    let (st, _) = send(
+        app,
+        put_as("/files/notes.txt", T_AGENT, b"line one\nline two\n"),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
 
     // blame attributes it to the agent
@@ -341,6 +398,41 @@ async fn unauthenticated_and_forged_mutations_are_rejected() {
     assert_eq!(st, StatusCode::OK);
     let (_st, body) = send(app, get("/blame/forge.txt")).await;
     let blame = as_json(&body);
-    assert_eq!(blame[0]["actor"], "dan", "attribution must follow the token, not ?actor=");
+    assert_eq!(
+        blame[0]["actor"], "dan",
+        "attribution must follow the token, not ?actor="
+    );
     assert_eq!(blame[0]["kind"], "human");
+}
+
+// SEC (security audit #8): reads are open by default, but `gate_reads` requires a
+// credential for reads too — closing the full-disclosure surface for operators
+// who want it. /health stays open regardless.
+#[tokio::test]
+async fn gate_reads_requires_a_credential_for_reads() {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let ws = Workspace::open_local(dir.path().join("meta.db"), dir.path().join("cas"))
+        .await
+        .unwrap();
+    let human = ws.create_human("dan", None).await.unwrap();
+    let auth = BearerAuth::new().with_token(T_HUMAN, human, None);
+    let app = router_with(
+        Arc::new(ws),
+        Arc::new(auth),
+        ApiOptions { gate_reads: true },
+    );
+
+    // /health stays open even when reads are gated.
+    let (st, _) = send(&app, get("/health")).await;
+    assert_eq!(st, StatusCode::OK);
+
+    // a read without a credential is now rejected...
+    let (st, _) = send(&app, get("/log")).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = send(&app, get("/files/anything.txt")).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // ...but works with a valid token.
+    let (st, _) = send(&app, get_as("/log", T_HUMAN)).await;
+    assert_eq!(st, StatusCode::OK);
 }

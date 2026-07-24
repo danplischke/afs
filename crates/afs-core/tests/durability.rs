@@ -32,7 +32,11 @@ async fn local_cas_write_fsyncs_object_and_directory() {
     // so the counter proves the write path, not just that puts happen.
     let before = store.sync_count();
     store.put(b"durable bytes").await.unwrap();
-    assert_eq!(store.sync_count(), before, "a dedup'd put must not re-fsync");
+    assert_eq!(
+        store.sync_count(),
+        before,
+        "a dedup'd put must not re-fsync"
+    );
 }
 
 // C4: a packed write must survive a "crash", modeled as a brand-new PackStore

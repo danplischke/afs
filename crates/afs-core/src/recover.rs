@@ -24,7 +24,7 @@ use crate::engine::Fs;
 use crate::error::Result;
 use crate::metadata::MetadataStore;
 use crate::objectgraph::{Commit, RefSnapshot, Tree, TreeKind};
-use crate::types::{Hash, INO_ROOT};
+use crate::types::Hash;
 use async_recursion::async_recursion;
 use std::collections::{HashMap, HashSet};
 
@@ -71,7 +71,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
         let scan = self.scan(&mut report).await?;
         let (branches, head_target, used_mirror) = resolve_refs(&scan);
         report.used_mirror = used_mirror;
-        report.branches = branches.iter().map(|(n, h)| (n.clone(), h.to_hex())).collect();
+        report.branches = branches
+            .iter()
+            .map(|(n, h)| (n.clone(), h.to_hex()))
+            .collect();
         report.checked_out = pick_checkout(&branches, head_target);
         Ok(report)
     }
@@ -108,8 +111,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                 .get(&tip)
                 .expect("branch tip is a scanned commit")
                 .tree;
-            self.meta.truncate_tree().await?;
-            self.materialize_into(tree, INO_ROOT).await?;
+            self.replace_working_tree(tree).await?;
             self.meta.set_ref(HEAD, &format!("ref:{branch}")).await?;
             self.tally_tree(tree, &mut report).await?;
             report.checked_out = Some(branch);

@@ -16,9 +16,8 @@ pub use afs_core::{
     Actor, ActorInit, ActorKind, AfsError, BlameRange, CommitInfo, Conflict, DiffEntry, DiffStatus,
     DirEntry, EditOp, EncryptedStore, Event, EventInit, EventSubscription, FileKind, GcStats,
     GcsConfig, Hash, Inode, MemStore, MergeOutcome, ObjectContentStore, PackStore, Presence,
-    RebuildReport, S3Config,
-    Suggestion, SuggestionInit, SuggestionStatus, TieredStore, ToolCallInit, VerifyingStore,
-    VersioningMode, WriteCtx,
+    RebuildReport, S3Config, Suggestion, SuggestionContent, SuggestionInit, SuggestionStatus,
+    TieredStore, ToolCallInit, VerifyingStore, VersioningMode, WriteCtx,
 };
 pub use bytes::Bytes;
 
@@ -56,16 +55,23 @@ impl Workspace {
     }
 
     /// SQLite metadata + a local content store **encrypted at rest** with a key
-    /// derived from `passphrase`. The same passphrase must be used on reopen;
-    /// the wrong one fails loudly rather than returning garbage.
+    /// derived from `passphrase` (Argon2id) and a per-store random salt kept in
+    /// `cas_dir/keysalt`. The same passphrase must be used on reopen; the wrong
+    /// one fails loudly rather than returning garbage. The salt is created on
+    /// first open and is not secret, but it must persist — it lives beside the
+    /// content store so it survives a metadata-DB loss (recovery-safe).
     pub async fn open_local_encrypted(
         db_path: impl AsRef<Path>,
         cas_dir: impl AsRef<Path>,
         passphrase: &str,
     ) -> Result<Self> {
+        let cas_dir = cas_dir.as_ref();
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
+        // Open the CAS first so the directory exists, then place the salt in it.
         let backend: Content = Arc::new(LocalCasStore::open(cas_dir).await?);
-        let content: Content = Arc::new(EncryptedStore::from_passphrase(backend, passphrase));
+        let salt = read_or_create_salt(cas_dir).await?;
+        let content: Content =
+            Arc::new(EncryptedStore::from_passphrase(backend, passphrase, &salt)?);
         Self::open(meta, content).await
     }
 
@@ -74,7 +80,8 @@ impl Workspace {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
         // Verify integrity on read: object storage can bit-rot, so a corrupt
         // object surfaces as `Corrupt` rather than being served as authentic (M1).
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
+        let content: Content =
+            Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
         Self::open(meta, content).await
     }
 
@@ -126,7 +133,8 @@ impl Workspace {
     /// verified (a bit-rotted object surfaces as `Corrupt`, not as authentic).
     pub async fn open_pg_s3(dsn: &str, cfg: S3Config) -> Result<Self> {
         let pg = Arc::new(PostgresMetadataStore::connect(dsn).await?);
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
+        let content: Content =
+            Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::s3(cfg)?)));
         let mut ws = Self::open(pg.clone(), content).await?;
         ws.pg = Some(pg);
         Ok(ws)
@@ -212,7 +220,9 @@ impl Workspace {
     /// local development and tests without a live bucket; content is not durable.
     pub async fn open_object_memory(db_path: impl AsRef<Path>) -> Result<Self> {
         let meta: Meta = Arc::new(SqliteMetadataStore::open(db_path)?);
-        let content: Content = Arc::new(VerifyingStore::new(Arc::new(ObjectContentStore::in_memory())));
+        let content: Content = Arc::new(VerifyingStore::new(Arc::new(
+            ObjectContentStore::in_memory(),
+        )));
         Self::open(meta, content).await
     }
 
@@ -294,7 +304,8 @@ impl Workspace {
 
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
         self.fs.rename(from, to).await?;
-        self.emit("rename", from, Some(to.to_string()), None, None).await;
+        self.emit("rename", from, Some(to.to_string()), None, None)
+            .await;
         Ok(())
     }
 
@@ -515,6 +526,13 @@ impl Workspace {
         self.fs.actor_by_subject(subject).await
     }
 
+    /// Every registered actor, oldest first. Use this to resolve the bare
+    /// `actor_id` carried by events, suggestions (`resolved_by` too), and
+    /// presence to a name + kind — no app-side actor directory needed.
+    pub async fn list_actors(&self) -> Result<Vec<Actor>> {
+        self.fs.list_actors().await
+    }
+
     /// Idempotently map your app's user id (`auth_subject`) to a **human** actor:
     /// returns the existing actor for that subject, or creates one. Race-safe, so
     /// you don't need to keep a user→actor side table.
@@ -589,6 +607,13 @@ impl Workspace {
         self.fs.suggestion_diff(id).await
     }
 
+    /// A suggestion's base and proposed **content** (read from the store), so a
+    /// reviewer UI can render an inline diff without stashing the proposed bytes
+    /// itself. `proposed` is `None` when the suggestion proposes a deletion.
+    pub async fn suggestion_content(&self, id: i64) -> Result<SuggestionContent> {
+        self.fs.suggestion_content(id).await
+    }
+
     /// Accept a pending suggestion: apply it (attributed to the original author)
     /// and mark it accepted. Errors if the file changed since it was proposed.
     pub async fn accept_suggestion(&self, id: i64, approver: WriteCtx) -> Result<()> {
@@ -661,5 +686,57 @@ impl Workspace {
     /// window. Returns the number of rows reaped.
     pub async fn reap_presence(&self, grace_secs: i64) -> Result<u64> {
         self.fs.reap_presence(grace_secs).await
+    }
+}
+
+/// Read the per-store encryption salt from `cas_dir/keysalt`, creating it with 16
+/// fresh random bytes on first open.
+///
+/// The salt is not secret, but the Argon2id key is derived from
+/// `passphrase + salt`, so it must stay stable for the life of the store and must
+/// survive a metadata-DB loss — hence it lives beside the content store, not in
+/// the DB. It is written with an exclusive `create_new`, so two processes opening
+/// the same fresh store concurrently can't settle on different salts: exactly one
+/// wins the create and the other re-reads the winner's file.
+async fn read_or_create_salt(cas_dir: &Path) -> Result<Vec<u8>> {
+    use tokio::io::AsyncWriteExt;
+    let path = cas_dir.join("keysalt");
+    match tokio::fs::read(&path).await {
+        Ok(salt) if !salt.is_empty() => return Ok(salt),
+        Ok(_) => {
+            return Err(AfsError::Content(format!(
+                "encryption salt {} is empty (refusing to derive a key from it)",
+                path.display()
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let mut salt = [0u8; 16];
+    getrandom::getrandom(&mut salt)
+        .map_err(|e| AfsError::Content(format!("failed to generate encryption salt: {e}")))?;
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+    {
+        Ok(mut f) => {
+            f.write_all(&salt).await?;
+            f.flush().await?;
+            Ok(salt.to_vec())
+        }
+        // Lost the create race with a concurrent open: adopt the salt they wrote.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let salt = tokio::fs::read(&path).await?;
+            if salt.is_empty() {
+                return Err(AfsError::Content(format!(
+                    "encryption salt {} is empty (refusing to derive a key from it)",
+                    path.display()
+                )));
+            }
+            Ok(salt)
+        }
+        Err(e) => Err(e.into()),
     }
 }

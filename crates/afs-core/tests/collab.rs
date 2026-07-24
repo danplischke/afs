@@ -24,10 +24,19 @@ fn event(actor: Option<i64>, kind: &str, path: &str) -> EventInit {
 #[tokio::test]
 async fn event_feed_is_cursor_ordered() {
     let m = store().await;
-    let alice = m.create_actor(ActorInit::human("alice", None)).await.unwrap();
+    let alice = m
+        .create_actor(ActorInit::human("alice", None))
+        .await
+        .unwrap();
 
-    let s1 = m.append_event(event(Some(alice), "write", "/a"), 100).await.unwrap();
-    let s2 = m.append_event(event(None, "mkdir", "/d"), 101).await.unwrap();
+    let s1 = m
+        .append_event(event(Some(alice), "write", "/a"), 100)
+        .await
+        .unwrap();
+    let s2 = m
+        .append_event(event(None, "mkdir", "/d"), 101)
+        .await
+        .unwrap();
     assert!(s2 > s1, "seq is monotonic");
 
     let all = m.events_since(0, 100).await.unwrap();
@@ -49,7 +58,10 @@ async fn event_feed_is_cursor_ordered() {
 #[tokio::test]
 async fn presence_reflects_heartbeats_and_staleness() {
     let m = store().await;
-    let alice = m.create_actor(ActorInit::human("alice", None)).await.unwrap();
+    let alice = m
+        .create_actor(ActorInit::human("alice", None))
+        .await
+        .unwrap();
     let bot = m
         .create_actor(ActorInit::agent("claude", "opus", None))
         .await
@@ -57,7 +69,9 @@ async fn presence_reflects_heartbeats_and_staleness() {
     let sa = m.create_session(alice, Some("cli"), 0).await.unwrap();
     let sb = m.create_session(bot, Some("mcp"), 0).await.unwrap();
 
-    m.touch_presence(sa, alice, Some("/a.txt"), 1000).await.unwrap();
+    m.touch_presence(sa, alice, Some("/a.txt"), 1000)
+        .await
+        .unwrap();
     m.touch_presence(sb, bot, None, 500).await.unwrap();
 
     // Both are active since 400; ordered by last_seen descending.
@@ -87,8 +101,8 @@ async fn presence_reflects_heartbeats_and_staleness() {
 /// Self-skips unless `AFS_PG_TEST_URL` is set.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_append_fires_notify() {
-    use afs_core::{PostgresMetadataStore, EVENT_CHANNEL};
-    use futures::{future, stream, StreamExt};
+    use afs_core::{EVENT_CHANNEL, PostgresMetadataStore};
+    use futures::{StreamExt, future, stream};
     use std::time::Duration;
 
     let Ok(dsn) = std::env::var("AFS_PG_TEST_URL") else {

@@ -11,7 +11,10 @@ fn count_objects(dir: &Path) -> usize {
     if let Ok(shards) = std::fs::read_dir(&objects) {
         for shard in shards.flatten() {
             if let Ok(entries) = std::fs::read_dir(shard.path()) {
-                n += entries.flatten().filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp")).count();
+                n += entries
+                    .flatten()
+                    .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+                    .count();
             }
         }
     }
@@ -19,7 +22,11 @@ fn count_objects(dir: &Path) -> usize {
 }
 
 fn blob(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+    let mut x = if seed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
+    };
     let mut out = Vec::with_capacity(len + 8);
     while out.len() < len {
         x ^= x << 13;

@@ -161,10 +161,11 @@ enum Cmd {
     /// Show per-line authorship (blame) for a file.
     Blame { path: String },
     /// Run a command over a copy-on-write view of the workspace, then import what
-    /// it changed as an attributed commit (or `--discard`). NOTE: this is an
+    /// it changed as an attributed commit (or `--discard`). By default this is an
     /// edit-capture view, not a security sandbox — the command runs with your
-    /// privileges and can reach the host; run only code you trust (see the
-    /// afs-sandbox docs). Usage: `afs sandbox --actor 1 -- <cmd> [args...]`
+    /// privileges and can reach the host; run only code you trust, or pass
+    /// `--isolate` to hide the host filesystem behind bubblewrap (a real boundary
+    /// for untrusted code). Usage: `afs sandbox --actor 1 -- <cmd> [args...]`
     Sandbox {
         /// Attribute imported changes to this actor id.
         #[arg(long)]
@@ -172,15 +173,21 @@ enum Cmd {
         /// Discard the sandbox's changes instead of importing them.
         #[arg(long)]
         discard: bool,
+        /// Isolate the command under bubblewrap so the host filesystem (incl. this
+        /// workspace's meta.db/cas and your credentials) is hidden — a real
+        /// boundary for untrusted code. Requires `bwrap` on PATH.
+        #[arg(long)]
+        isolate: bool,
         /// The command to run (after `--`).
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
     /// Run an agent in a live native overlay mount over the workspace: it works
     /// in a fast unprivileged kernel overlay while its changes stream into afs
-    /// (attributed) as it goes — not just on exit. NOTE: an edit-capture view,
-    /// not a security sandbox — the agent runs with your privileges and can reach
-    /// the host; run only agents you trust. Usage: `afs overlay --actor 1 -- <cmd>`
+    /// (attributed) as it goes — not just on exit. By default an edit-capture
+    /// view, not a security sandbox — the agent runs with your privileges and can
+    /// reach the host; run only agents you trust, or pass `--isolate` for a real
+    /// bubblewrap boundary. Usage: `afs overlay --actor 1 -- <cmd>`
     Overlay {
         /// Attribute the agent's changes to this actor id.
         #[arg(long)]
@@ -188,6 +195,10 @@ enum Cmd {
         /// How often (ms) to sync the agent's changes into afs while it runs.
         #[arg(long, default_value_t = 500)]
         sync_ms: u64,
+        /// Isolate the agent under bubblewrap so the host filesystem is hidden — a
+        /// real boundary for untrusted code. Requires `bwrap` on PATH.
+        #[arg(long)]
+        isolate: bool,
         /// The agent command to run (after `--`).
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
@@ -462,11 +473,7 @@ async fn main() -> Result<()> {
                 print!("{patch}");
             }
         }
-        Cmd::Accept {
-            id,
-            actor,
-            session,
-        } => {
+        Cmd::Accept { id, actor, session } => {
             let ctx = match session {
                 Some(s) => WriteCtx::session(actor, s),
                 None => WriteCtx::actor(actor),
@@ -474,11 +481,7 @@ async fn main() -> Result<()> {
             ws.accept_suggestion(id, ctx).await?;
             println!("accepted suggestion #{id}");
         }
-        Cmd::Reject {
-            id,
-            actor,
-            session,
-        } => {
+        Cmd::Reject { id, actor, session } => {
             let ctx = match session {
                 Some(s) => WriteCtx::session(actor, s),
                 None => WriteCtx::actor(actor),
@@ -580,9 +583,16 @@ async fn main() -> Result<()> {
         Cmd::Sandbox {
             actor,
             discard,
+            isolate,
             cmd,
         } => {
-            if !afs_sandbox::overlay_supported() {
+            if isolate {
+                if !afs_sandbox::bwrap_available() {
+                    anyhow::bail!(
+                        "--isolate needs bubblewrap (`bwrap`) on PATH (>= 0.8.0, for overlay support)"
+                    );
+                }
+            } else if !afs_sandbox::overlay_supported() {
                 anyhow::bail!(
                     "unprivileged overlayfs is unavailable here (needs user-namespace overlay support)"
                 );
@@ -594,6 +604,7 @@ async fn main() -> Result<()> {
                 actor,
                 discard,
                 work_root: tmp.clone(),
+                isolate,
             };
             let outcome = afs_sandbox::run(&ws, opts, &cmd).await?;
             let _ = std::fs::remove_dir_all(&tmp);
@@ -610,9 +621,16 @@ async fn main() -> Result<()> {
         Cmd::Overlay {
             actor,
             sync_ms,
+            isolate,
             cmd,
         } => {
-            if !afs_sandbox::overlay_supported() {
+            if isolate {
+                if !afs_sandbox::bwrap_available() {
+                    anyhow::bail!(
+                        "--isolate needs bubblewrap (`bwrap`) on PATH (>= 0.8.0, for overlay support)"
+                    );
+                }
+            } else if !afs_sandbox::overlay_supported() {
                 anyhow::bail!(
                     "unprivileged overlayfs is unavailable here (needs user-namespace overlay support)"
                 );
@@ -624,6 +642,7 @@ async fn main() -> Result<()> {
                 actor,
                 work_root: tmp.clone(),
                 sync_interval: std::time::Duration::from_millis(sync_ms),
+                isolate,
             };
             let outcome = afs_sandbox::run_live(&ws, opts, &cmd).await?;
             let _ = std::fs::remove_dir_all(&tmp);
@@ -773,6 +792,16 @@ async fn main() -> Result<()> {
             afs_api::serve(std::sync::Arc::new(ws), addr, auth).await?;
         }
         Cmd::Nfs { addr } => {
+            // NFSv3 is unauthenticated; warn loudly if this isn't a loopback bind.
+            if addr
+                .parse::<std::net::SocketAddr>()
+                .map(|s| !s.ip().is_loopback())
+                .unwrap_or(false)
+            {
+                eprintln!(
+                    "warning: binding NFS to a non-loopback address ({addr}); NFSv3 has no authentication — anyone who can reach it gets full, unattributed access. Prefer a loopback bind reached over a tunnel/VPN."
+                );
+            }
             println!(
                 "serving afs over NFSv3 at {addr}\n  mount with: mount -t nfs -o vers=3,tcp,port=<port>,mountport=<port>,nolock <host>:/ /mnt"
             );

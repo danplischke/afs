@@ -95,6 +95,10 @@ pub trait MetadataStore: Send + Sync {
 
     async fn get_config(&self, key: &str) -> Result<Option<String>>;
     async fn set_config(&self, key: &str, value: &str) -> Result<()>;
+    /// Atomically increment the integer config counter at `key` (creating it at
+    /// `1`) and return the new value. A single statement, so concurrent callers
+    /// each get a distinct, strictly increasing value — unlike a read-then-write.
+    async fn bump_counter(&self, key: &str) -> Result<i64>;
 
     // --- working tree ----------------------------------------------------
 
@@ -129,6 +133,10 @@ pub trait MetadataStore: Send + Sync {
     /// Look up an actor by external identity (`auth_subject`). At most one exists
     /// (a partial UNIQUE index enforces it); returns `None` if unregistered.
     async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>>;
+    /// Every registered actor, oldest first. Lets a caller resolve the bare
+    /// `actor_id` carried by events/suggestions/presence to a name+kind without
+    /// having created the actor itself.
+    async fn list_actors(&self) -> Result<Vec<Actor>>;
     async fn create_session(
         &self,
         actor_id: i64,
@@ -205,6 +213,18 @@ pub trait MetaTxn: Send {
     async fn create_inode(&mut self, init: InodeInit) -> Result<Ino>;
     /// Set an inode's content address and size.
     async fn set_content(&mut self, ino: Ino, content: Option<Hash>, size: u64) -> Result<()>;
+    /// Compare-and-set an inode's content: apply `content`/`size` only if the
+    /// inode's current content still equals `expected` (null-safe), returning
+    /// whether it applied. Lets an attributed write be conditional on the file not
+    /// having changed since it was read — the atomic apply behind a suggestion
+    /// accept (optimistic concurrency; no lost updates).
+    async fn set_content_if(
+        &mut self,
+        ino: Ino,
+        expected: Option<&Hash>,
+        content: Option<Hash>,
+        size: u64,
+    ) -> Result<bool>;
     /// Set an inode's link count.
     async fn set_nlink(&mut self, ino: Ino, nlink: i64) -> Result<()>;
     /// Delete an inode (and any symlink row).
@@ -219,6 +239,12 @@ pub trait MetaTxn: Send {
     async fn set_blob_blame(&mut self, content: &Hash, runs: &str) -> Result<()>;
     /// Append an op-log entry, returning its id.
     async fn append_edit_op(&mut self, op: EditOpInit) -> Result<i64>;
+    /// Delete the whole working tree (every inode except the root, and all
+    /// dentries/symlinks) as part of this transaction — so a `truncate` +
+    /// rematerialize (checkout/merge/rebuild) commits atomically and a failure or
+    /// concurrent reader never sees a half-emptied tree. Blame (keyed by content
+    /// hash) is deliberately not cleared.
+    async fn truncate_tree(&mut self) -> Result<()>;
     /// Commit every staged mutation atomically. Consumes the transaction.
     async fn commit(self: Box<Self>) -> Result<()>;
 }
@@ -293,6 +319,9 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         (**self).set_config(key, value).await
     }
+    async fn bump_counter(&self, key: &str) -> Result<i64> {
+        (**self).bump_counter(key).await
+    }
     async fn truncate_tree(&self) -> Result<()> {
         (**self).truncate_tree().await
     }
@@ -322,6 +351,9 @@ impl<T: MetadataStore + ?Sized> MetadataStore for Arc<T> {
     }
     async fn actor_by_subject(&self, subject: &str) -> Result<Option<Actor>> {
         (**self).actor_by_subject(subject).await
+    }
+    async fn list_actors(&self) -> Result<Vec<Actor>> {
+        (**self).list_actors().await
     }
     async fn create_session(
         &self,

@@ -34,23 +34,23 @@ pub mod vfs;
 
 pub use attribution::{Actor, ActorInit, ActorKind, BlameRange, EditOp, ToolCallInit, WriteCtx};
 pub use chunk::{AVG_CHUNK, ChunkRef, MAX_CHUNK, MIN_CHUNK, Manifest};
-pub use collab::{Event, EventInit, Presence, EVENT_CHANNEL, PRESENCE_WINDOW_SECS};
+pub use collab::{EVENT_CHANNEL, Event, EventInit, PRESENCE_WINDOW_SECS, Presence};
 pub use content::{ContentStore, LocalCasStore, MemStore, TieredStore, VerifyingStore};
 pub use encrypt::EncryptedStore;
 pub use engine::Fs;
 pub use error::{AfsError, Result};
 pub use gc::GcStats;
-pub use migrations::latest_schema_version;
 pub use merge::{Conflict, MergeOutcome};
 pub use metadata::{MetaTxn, MetadataStore};
+pub use migrations::latest_schema_version;
 pub use objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, RefSnapshot, Tree, TreeEntry, TreeKind,
     VersioningMode,
 };
 pub use objectstore::{GcsConfig, ObjectContentStore, S3Config};
-pub use pack::{PackStore, DEFAULT_PACK_SIZE};
+pub use pack::{DEFAULT_PACK_SIZE, PackStore};
 pub use postgres::{EventSubscription, PostgresMetadataStore};
 pub use recover::RebuildReport;
 pub use sqlite::SqliteMetadataStore;
-pub use suggest::{Suggestion, SuggestionInit, SuggestionStatus};
+pub use suggest::{Suggestion, SuggestionContent, SuggestionInit, SuggestionStatus};
 pub use types::{DirEntry, FileKind, Hash, INO_ROOT, Ino, Inode, InodeInit};

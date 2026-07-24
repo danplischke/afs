@@ -11,7 +11,7 @@ use crate::chunk::Manifest;
 use crate::content::ContentStore;
 use crate::engine::Fs;
 use crate::error::{AfsError, Result};
-use crate::metadata::MetadataStore;
+use crate::metadata::{MetaTxn, MetadataStore};
 use crate::objectgraph::{
     Commit, CommitInfo, DiffEntry, DiffStatus, RefSnapshot, Tree, TreeEntry, TreeKind,
     VersioningMode,
@@ -78,16 +78,10 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// hash is then recorded in `config` so GC keeps exactly it and reaps
     /// superseded snapshots.
     pub(crate) async fn mirror_refs(&self) -> Result<()> {
-        let generation = self
-            .meta
-            .get_config(REFS_MIRROR_GEN)
-            .await?
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0)
-            + 1;
-        self.meta
-            .set_config(REFS_MIRROR_GEN, &generation.to_string())
-            .await?;
+        // Atomic increment: concurrent ref-advancing operations each get a
+        // distinct, strictly increasing generation, so a recovery scan can pick
+        // the newest snapshot unambiguously — no read-then-write race (audit #21).
+        let generation = self.meta.bump_counter(REFS_MIRROR_GEN).await? as u64;
         let refs = self.meta.list_refs().await?;
         let hash = self
             .content
@@ -266,45 +260,61 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             Hash::from_hex(&value).ok_or_else(|| AfsError::Metadata("bad ref value".into()))?;
         let commit = Commit::decode(&self.content.get(&commit_hash).await?)?;
 
-        self.meta.truncate_tree().await?;
-        self.materialize_into(commit.tree, INO_ROOT).await?;
+        self.replace_working_tree(commit.tree).await?;
         self.meta.set_ref(HEAD, &format!("ref:{branch}")).await?;
         self.mirror_refs().await?;
         Ok(())
     }
 
-    /// Materialize a tree's entries as children of `parent_ino`.
+    /// Atomically replace the working tree with the contents of `tree_hash`:
+    /// truncate the current tree and rematerialize the new one inside a single
+    /// metadata transaction, so a failure mid-materialize — or a concurrent
+    /// reader — never observes a half-emptied tree (audit #9). Used by checkout,
+    /// merge, and rebuild.
+    pub(crate) async fn replace_working_tree(&self, tree_hash: Hash) -> Result<()> {
+        let mut txn = self.meta.begin().await?;
+        txn.truncate_tree().await?;
+        self.materialize_into_txn(&mut *txn, tree_hash, INO_ROOT)
+            .await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Materialize a tree's entries as children of `parent_ino`, staging every
+    /// inode/dentry in `txn` so the whole subtree commits atomically.
     #[async_recursion]
-    pub(crate) async fn materialize_into(&self, tree_hash: Hash, parent_ino: Ino) -> Result<()> {
+    async fn materialize_into_txn(
+        &self,
+        txn: &mut dyn MetaTxn,
+        tree_hash: Hash,
+        parent_ino: Ino,
+    ) -> Result<()> {
         let tree = Tree::decode(&self.content.get(&tree_hash).await?)?;
         for e in &tree.entries {
             match e.kind {
                 TreeKind::Dir => {
-                    let ino = self
-                        .meta
+                    let ino = txn
                         .create_inode(InodeInit {
                             kind: FileKind::Dir,
                             mode: e.mode,
                         })
                         .await?;
-                    self.meta.add_dentry(parent_ino, &e.name, ino).await?;
-                    self.materialize_into(e.hash, ino).await?;
+                    txn.add_dentry(parent_ino, &e.name, ino).await?;
+                    self.materialize_into_txn(&mut *txn, e.hash, ino).await?;
                 }
                 TreeKind::File => {
-                    let ino = self
-                        .meta
+                    let ino = txn
                         .create_inode(InodeInit {
                             kind: FileKind::File,
                             mode: e.mode,
                         })
                         .await?;
                     let size = Manifest::decode(&self.content.get(&e.hash).await?)?.size;
-                    self.meta.set_content(ino, Some(e.hash), size).await?;
-                    self.meta.add_dentry(parent_ino, &e.name, ino).await?;
+                    txn.set_content(ino, Some(e.hash), size).await?;
+                    txn.add_dentry(parent_ino, &e.name, ino).await?;
                 }
                 TreeKind::Symlink => {
-                    let ino = self
-                        .meta
+                    let ino = txn
                         .create_inode(InodeInit {
                             kind: FileKind::Symlink,
                             mode: e.mode,
@@ -312,8 +322,8 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
                         .await?;
                     let target =
                         String::from_utf8_lossy(&self.content.get(&e.hash).await?).into_owned();
-                    self.meta.set_symlink(ino, &target).await?;
-                    self.meta.add_dentry(parent_ino, &e.name, ino).await?;
+                    txn.set_symlink(ino, &target).await?;
+                    txn.add_dentry(parent_ino, &e.name, ino).await?;
                 }
             }
         }
@@ -374,7 +384,8 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     async fn flatten_commit(&self, commit_hash: Hash) -> Result<BTreeMap<String, Hash>> {
         let commit = Commit::decode(&self.content.get(&commit_hash).await?)?;
         let mut map = BTreeMap::new();
-        self.flatten_tree(commit.tree, String::new(), &mut map).await?;
+        self.flatten_tree(commit.tree, String::new(), &mut map)
+            .await?;
         Ok(map)
     }
 
@@ -386,7 +397,9 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// 32-byte compare and never touch the chunk store. Only the paths this
     /// returns need a real line diff — see [`Self::diff_file`].
     pub async fn diff(&self, from: &str, to: &str) -> Result<Vec<DiffEntry>> {
-        let base = self.flatten_commit(self.resolve_commit(from).await?).await?;
+        let base = self
+            .flatten_commit(self.resolve_commit(from).await?)
+            .await?;
         let target = self.flatten_commit(self.resolve_commit(to).await?).await?;
         Ok(diff_maps(&base, &target))
     }
@@ -395,7 +408,9 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
     /// empty string when the file is byte-identical (or absent) on both sides.
     /// Binary content is compared lossily as UTF-8.
     pub async fn diff_file(&self, from: &str, to: &str, path: &str) -> Result<String> {
-        let base = self.flatten_commit(self.resolve_commit(from).await?).await?;
+        let base = self
+            .flatten_commit(self.resolve_commit(from).await?)
+            .await?;
         let target = self.flatten_commit(self.resolve_commit(to).await?).await?;
         // Fast path: identical (or both-absent) content addresses — no reads.
         if base.get(path) == target.get(path) {

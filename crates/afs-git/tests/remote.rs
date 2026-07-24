@@ -91,7 +91,11 @@ async fn clone_edit_push_roundtrip() {
         b"hello\nedited via git\n"
     );
     let log = ws.log().await.unwrap();
-    assert_eq!(log.len(), 2, "the pushed commit is on top of the initial one");
+    assert_eq!(
+        log.len(),
+        2,
+        "the pushed commit is on top of the initial one"
+    );
     assert_eq!(log[0].commit.message, "from git client");
     assert_eq!(log[1].commit.message, "initial");
 }

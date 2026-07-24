@@ -2,8 +2,8 @@
 //! Each test pins a specific fix so the failure mode can't silently return.
 
 use afs_core::{
-    ActorInit, AfsError, ChunkRef, Fs, Hash, Manifest, MemStore, MetadataStore, SqliteMetadataStore,
-    WriteCtx, INO_ROOT,
+    ActorInit, AfsError, ChunkRef, Fs, Hash, INO_ROOT, Manifest, MemStore, MetadataStore,
+    SqliteMetadataStore, WriteCtx,
 };
 use std::sync::Arc;
 
@@ -80,7 +80,9 @@ async fn gc_keeps_pending_suggestion_content() {
     fs.gc().await.unwrap();
 
     assert!(fs.suggestion_diff(sid).await.unwrap().contains("+two"));
-    fs.accept_suggestion(sid, WriteCtx::actor(reviewer)).await.unwrap();
+    fs.accept_suggestion(sid, WriteCtx::actor(reviewer))
+        .await
+        .unwrap();
     assert_eq!(&fs.read("/f.txt").await.unwrap()[..], b"one\ntwo\n");
 }
 
@@ -93,13 +95,23 @@ async fn empty_suggestion_is_not_a_deletion() {
     let reviewer = fs.create_human("reviewer", None).await.unwrap();
     fs.write("/e.txt", b"stuff\n").await.unwrap();
 
-    let sid = fs.suggest(WriteCtx::actor(actor), "/e.txt", b"", None).await.unwrap();
-    fs.accept_suggestion(sid, WriteCtx::actor(reviewer)).await.unwrap();
+    let sid = fs
+        .suggest(WriteCtx::actor(actor), "/e.txt", b"", None)
+        .await
+        .unwrap();
+    fs.accept_suggestion(sid, WriteCtx::actor(reviewer))
+        .await
+        .unwrap();
     // still present, now empty
     assert_eq!(&fs.read("/e.txt").await.unwrap()[..], b"");
 
-    let del = fs.suggest_delete(WriteCtx::actor(actor), "/e.txt", None).await.unwrap();
-    fs.accept_suggestion(del, WriteCtx::actor(reviewer)).await.unwrap();
+    let del = fs
+        .suggest_delete(WriteCtx::actor(actor), "/e.txt", None)
+        .await
+        .unwrap();
+    fs.accept_suggestion(del, WriteCtx::actor(reviewer))
+        .await
+        .unwrap();
     assert!(fs.read("/e.txt").await.is_err());
 }
 
@@ -141,11 +153,17 @@ async fn traversal_path_components_are_rejected_everywhere() {
     // The inode-oriented FUSE/NFS boundary (raw name components).
     for bad in ["..", ".", "a/b", "x\0y", ""] {
         assert!(
-            matches!(fs.vfs_create(INO_ROOT, bad, 0o644).await, Err(AfsError::InvalidPath(_))),
+            matches!(
+                fs.vfs_create(INO_ROOT, bad, 0o644).await,
+                Err(AfsError::InvalidPath(_))
+            ),
             "vfs_create should reject {bad:?}"
         );
         assert!(
-            matches!(fs.vfs_mkdir(INO_ROOT, bad, 0o755).await, Err(AfsError::InvalidPath(_))),
+            matches!(
+                fs.vfs_mkdir(INO_ROOT, bad, 0o755).await,
+                Err(AfsError::InvalidPath(_))
+            ),
             "vfs_mkdir should reject {bad:?}"
         );
     }
@@ -227,7 +245,8 @@ async fn concurrent_merges_never_orphan_a_success() {
 
     let head = fs.head_commit().await.unwrap();
     for o in &outcomes {
-        if let Ok(afs_core::MergeOutcome::Merged(h)) | Ok(afs_core::MergeOutcome::FastForward(h)) = o
+        if let Ok(afs_core::MergeOutcome::Merged(h)) | Ok(afs_core::MergeOutcome::FastForward(h)) =
+            o
         {
             assert_eq!(
                 Some(*h),
@@ -238,4 +257,113 @@ async fn concurrent_merges_never_orphan_a_success() {
     }
     // and the surviving history is well-formed: both changes are reachable.
     assert!(fs.is_ancestor(feat, head.unwrap()).await.unwrap());
+}
+
+// SEC (security audit #9): checkout/merge/rebuild replace the working tree in one
+// transaction, so a rematerialize that fails partway — here, a commit whose tree
+// references an object missing from the content store — rolls back and leaves the
+// previous working tree intact, never half-emptied.
+#[tokio::test]
+async fn checkout_rolls_back_and_keeps_the_tree_on_a_missing_object() {
+    use afs_core::{Commit, ContentStore, Tree, TreeEntry, TreeKind};
+    let fs = fixture().await;
+    fs.write("/keep.txt", b"hello").await.unwrap();
+    fs.commit("dan", "base").await.unwrap();
+
+    // A branch whose commit tree references a file manifest that was never stored.
+    let missing = Hash::of(b"a manifest that was never stored");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: "bad.txt".to_string(),
+            mode: 0o100644,
+            kind: TreeKind::File,
+            hash: missing,
+        }],
+    };
+    let tree_hash = fs.content.put(&tree.encode()).await.unwrap();
+    let commit = Commit {
+        tree: tree_hash,
+        parents: vec![],
+        author: "x".to_string(),
+        message: "broken".to_string(),
+        timestamp: 0,
+    };
+    let commit_hash = fs.content.put(&commit.encode()).await.unwrap();
+    fs.meta
+        .set_ref("broken", &commit_hash.to_hex())
+        .await
+        .unwrap();
+
+    // Checkout fails when materialize hits the missing object...
+    assert!(fs.checkout("broken").await.is_err());
+    // ...and the previous working tree survived intact (the transaction rolled back).
+    assert_eq!(&fs.read("/keep.txt").await.unwrap()[..], b"hello");
+}
+
+// SEC (security audit #13/#18): accept_suggestion applies the proposed content
+// atomically via write_as_expecting — the write only lands if the file is still
+// at the base it was proposed against, so a change that slips in after the
+// staleness check can't be silently clobbered (optimistic concurrency).
+#[tokio::test]
+async fn write_as_expecting_is_a_content_cas() {
+    let fs = fixture().await;
+    let actor = fs.create_human("dan", None).await.unwrap();
+    let ctx = WriteCtx::actor(actor);
+    fs.write_as(ctx, "/f.txt", b"base").await.unwrap();
+
+    // the file's current content hash — what a suggestion records as its base.
+    let base = fs
+        .vfs_lookup(INO_ROOT, "f.txt")
+        .await
+        .unwrap()
+        .unwrap()
+        .content;
+
+    // expecting the wrong base => Conflict, and the file is left untouched.
+    let wrong = Some(Hash::of(b"not the current manifest"));
+    assert!(matches!(
+        fs.write_as_expecting(ctx, "/f.txt", b"proposed", wrong)
+            .await,
+        Err(AfsError::Conflict(_))
+    ));
+    assert_eq!(&fs.read("/f.txt").await.unwrap()[..], b"base");
+
+    // expecting the real base => the write applies.
+    fs.write_as_expecting(ctx, "/f.txt", b"proposed", base)
+        .await
+        .unwrap();
+    assert_eq!(&fs.read("/f.txt").await.unwrap()[..], b"proposed");
+}
+
+// SEC (security audit #21): mirror_refs bumps its generation via an atomic
+// counter, not a read-then-write — so concurrent ref updates get distinct,
+// strictly increasing generations and a recovery scan can pick the newest
+// snapshot unambiguously.
+#[tokio::test]
+async fn bump_counter_is_atomic_and_distinct() {
+    let m = Arc::new(SqliteMetadataStore::open_in_memory().unwrap());
+    m.init().await.unwrap();
+
+    // sequential increments start at 1 and step by one
+    assert_eq!(m.bump_counter("c").await.unwrap(), 1);
+    assert_eq!(m.bump_counter("c").await.unwrap(), 2);
+
+    // concurrent bumps never collide: three racers yield {3, 4, 5}
+    let (a, b, c) = tokio::join!(
+        {
+            let m = m.clone();
+            async move { m.bump_counter("c").await.unwrap() }
+        },
+        {
+            let m = m.clone();
+            async move { m.bump_counter("c").await.unwrap() }
+        },
+        {
+            let m = m.clone();
+            async move { m.bump_counter("c").await.unwrap() }
+        },
+    );
+    let mut got = [a, b, c];
+    got.sort();
+    assert_eq!(got, [3, 4, 5]);
 }

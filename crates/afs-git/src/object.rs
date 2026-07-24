@@ -192,8 +192,8 @@ pub fn write_loose(git_dir: &Path, obj: &GitObject) -> Result<()> {
 pub fn read_loose(git_dir: &Path, oid_hex: &str) -> Result<(String, Vec<u8>)> {
     validate_oid(oid_hex)?;
     let path = loose_path(git_dir, oid_hex);
-    let compressed = std::fs::read(&path)
-        .map_err(|_| AfsError::NotFound(format!("git object {oid_hex}")))?;
+    let compressed =
+        std::fs::read(&path).map_err(|_| AfsError::NotFound(format!("git object {oid_hex}")))?;
     let mut framed = Vec::new();
     // Bounded inflate: cap the output so a decompression bomb can't OOM us.
     flate2::read::ZlibDecoder::new(&compressed[..])
@@ -234,7 +234,11 @@ pub fn parse_tree(payload: &[u8], fmt: ObjectFormat) -> Result<Vec<ParsedTreeEnt
     let mut out = Vec::new();
     let mut i = 0;
     while i < payload.len() {
-        let sp = payload[i..].iter().position(|&b| b == b' ').ok_or_else(bad)? + i;
+        let sp = payload[i..]
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or_else(bad)?
+            + i;
         let nul = payload[i..].iter().position(|&b| b == 0).ok_or_else(bad)? + i;
         if nul < sp || nul + 1 + oid_len > payload.len() {
             return Err(bad());
@@ -326,10 +330,10 @@ mod tests {
         for bad in [
             "..",
             "../../etc/passwd",
-            "x",                 // too short, would panic `[..2]`
+            "x", // too short, would panic `[..2]`
             "",
-            &"a".repeat(41),     // wrong width
-            &"z".repeat(40),     // non-hex
+            &"a".repeat(41), // wrong width
+            &"z".repeat(40), // non-hex
             "abc/def",
         ] {
             assert!(validate_oid(bad).is_err(), "oid {bad:?} must be rejected");

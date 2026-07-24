@@ -19,9 +19,13 @@
 //! never reused across different messages.
 //!
 //! **Keys.** Provide a 32-byte key, or derive one from a passphrase via
-//! [`EncryptedStore::from_passphrase`] (BLAKE3's `derive_key` KDF). Losing the
-//! key means the data is unrecoverable; reading with the wrong key fails loudly
-//! rather than returning garbage (the AEAD tag won't verify).
+//! [`EncryptedStore::from_passphrase`] — **Argon2id** (memory-hard) with a
+//! per-store random salt, so a weak passphrase is expensive to brute-force
+//! offline and the same passphrase never yields the same key across stores. The
+//! salt is not secret but must persist; afs-sdk keeps it alongside the content
+//! store (so it survives a metadata-DB loss). Losing the key means the data is
+//! unrecoverable; the wrong key fails loudly rather than returning garbage (the
+//! AEAD tag won't verify).
 
 use crate::content::ContentStore;
 use crate::error::{AfsError, Result};
@@ -32,7 +36,6 @@ use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use std::sync::Arc;
 
-const KDF_CONTEXT: &str = "afs content encryption v1";
 const NONCE_CONTEXT: &str = "afs content nonce v1";
 
 /// A content store that encrypts objects at rest over an inner store.
@@ -49,10 +52,23 @@ impl EncryptedStore {
         Self { inner, cipher, key }
     }
 
-    /// Wrap `inner`, deriving the key from a passphrase (BLAKE3 `derive_key`).
-    pub fn from_passphrase(inner: Arc<dyn ContentStore>, passphrase: &str) -> Self {
-        let key = blake3::derive_key(KDF_CONTEXT, passphrase.as_bytes());
-        Self::new(inner, key)
+    /// Wrap `inner`, deriving the 256-bit key from `passphrase` with **Argon2id**
+    /// (memory-hard) and a caller-supplied `salt` (>= 8 bytes). The same
+    /// `(passphrase, salt)` must be used on every open. The salt is not secret but
+    /// must be persisted somewhere durable that travels with the store — afs-sdk
+    /// keeps it beside the content store so it survives a metadata-DB loss.
+    pub fn from_passphrase(
+        inner: Arc<dyn ContentStore>,
+        passphrase: &str,
+        salt: &[u8],
+    ) -> Result<Self> {
+        use argon2::{Algorithm, Argon2, Params, Version};
+        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default());
+        let mut key = [0u8; 32];
+        argon
+            .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+            .map_err(|e| AfsError::Content(format!("passphrase key derivation failed: {e}")))?;
+        Ok(Self::new(inner, key))
     }
 
     /// Derive a 192-bit nonce from the storage key, keyed by the encryption key,
@@ -93,6 +109,21 @@ impl ContentStore for EncryptedStore {
     }
 
     async fn put_keyed(&self, key: &Hash, bytes: &[u8]) -> Result<()> {
+        // The nonce is derived from `key` (so reads can re-derive it), which is
+        // only safe when a key maps to exactly one plaintext — i.e. content
+        // addressing, `key == Hash::of(bytes)`. Storing two different plaintexts
+        // under the same key would reuse an (key, nonce) pair, breaking the AEAD.
+        // Reject any non-content-addressed key so a mutable-value keyed store
+        // (e.g. a `PackStore` index, whose entry for a chunk changes on repack)
+        // can't be wrapped in encryption and silently made insecure.
+        if key != &Hash::of(bytes) {
+            return Err(AfsError::Content(
+                "EncryptedStore::put_keyed requires a content-addressed key \
+                 (key == hash of bytes); wrapping a non-content-addressed keyed \
+                 store in encryption would reuse an AEAD nonce"
+                    .into(),
+            ));
+        }
         let ciphertext = self.encrypt(key, bytes)?;
         self.inner.put_keyed(key, &ciphertext).await
     }

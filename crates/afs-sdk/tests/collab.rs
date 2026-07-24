@@ -19,12 +19,19 @@ async fn operations_land_on_the_feed_with_attribution() {
     // A human and an agent share the workspace.
     let alice = ws.create_human("alice", None).await.unwrap();
     let alice_s = ws.create_session(alice, Some("cli")).await.unwrap();
-    let bot = ws.create_agent("claude", "opus", Some(alice)).await.unwrap();
-    let bot_s = ws.create_session(bot, Some("mcp")).await.unwrap();
-
-    ws.write_as(WriteCtx::session(alice, alice_s), "/notes.txt", b"human line\n")
+    let bot = ws
+        .create_agent("claude", "opus", Some(alice))
         .await
         .unwrap();
+    let bot_s = ws.create_session(bot, Some("mcp")).await.unwrap();
+
+    ws.write_as(
+        WriteCtx::session(alice, alice_s),
+        "/notes.txt",
+        b"human line\n",
+    )
+    .await
+    .unwrap();
     ws.write_as(
         WriteCtx::session(bot, bot_s),
         "/notes.txt",
@@ -37,8 +44,14 @@ async fn operations_land_on_the_feed_with_attribution() {
     let events = ws.watch(0).await.unwrap();
     let writes: Vec<_> = events.iter().filter(|e| e.kind == "write").collect();
     assert_eq!(writes.len(), 2, "both attributed writes are on the feed");
-    assert_eq!((writes[0].actor_id, writes[0].session_id), (Some(alice), Some(alice_s)));
-    assert_eq!((writes[1].actor_id, writes[1].session_id), (Some(bot), Some(bot_s)));
+    assert_eq!(
+        (writes[0].actor_id, writes[0].session_id),
+        (Some(alice), Some(alice_s))
+    );
+    assert_eq!(
+        (writes[1].actor_id, writes[1].session_id),
+        (Some(bot), Some(bot_s))
+    );
     let commit = events.iter().find(|e| e.kind == "commit").unwrap();
     assert_eq!(commit.detail.as_deref(), Some("snapshot"));
 
@@ -66,7 +79,13 @@ async fn structural_ops_are_recorded() {
     assert_eq!(kinds, vec!["mkdir", "write", "rename", "remove"]);
 
     // rename carries its destination in `detail`.
-    let rename = ws.watch(0).await.unwrap().into_iter().find(|e| e.kind == "rename").unwrap();
+    let rename = ws
+        .watch(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "rename")
+        .unwrap();
     assert_eq!(rename.path, "/src/a.txt");
     assert_eq!(rename.detail.as_deref(), Some("/src/b.txt"));
 }
@@ -87,5 +106,9 @@ async fn presence_lists_active_collaborators() {
     let bot_p = present.iter().find(|p| p.display_name == "claude").unwrap();
     assert_eq!(bot_p.kind.as_str(), "agent");
     assert_eq!(bot_p.path.as_deref(), Some("/src/main.rs"));
-    assert!(present.iter().any(|p| p.display_name == "alice" && p.kind.as_str() == "human"));
+    assert!(
+        present
+            .iter()
+            .any(|p| p.display_name == "alice" && p.kind.as_str() == "human")
+    );
 }

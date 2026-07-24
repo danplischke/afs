@@ -17,6 +17,7 @@ its own extra dependencies only when used):
 from ._afs import (
     AfsError,
     ConflictError,
+    GcsConfig,
     Mount,
     S3Config,
     Subscription,
@@ -28,6 +29,7 @@ from ._afs import (
 __all__ = [
     "AfsError",
     "ConflictError",
+    "GcsConfig",
     "Mount",
     "S3Config",
     "Subscription",

@@ -17,7 +17,6 @@ use crate::objectgraph::{
     VersioningMode,
 };
 use crate::types::{FileKind, Hash, INO_ROOT, Ino, InodeInit};
-use crate::util::now_secs;
 use async_recursion::async_recursion;
 use std::collections::BTreeMap;
 
@@ -156,7 +155,7 @@ impl<M: MetadataStore, C: ContentStore> Fs<M, C> {
             parents,
             author: author.to_string(),
             message: message.to_string(),
-            timestamp: now_secs(),
+            timestamp: self.now_secs(),
         };
         let commit_hash = self.content.put(&commit.encode()).await?;
         // Durability barrier: seal any open pack so the whole snapshot is

@@ -392,3 +392,239 @@ async fn faulty_store_crash_semantics() {
         "broken store must lose even flushed data"
     );
 }
+
+// --- more invariants over the same harness ----------------------------------
+
+/// Deterministic multi-line UTF-8 text, so writes land on the *line-based* blame
+/// path (not the binary/file-level one).
+fn text_blob(rng: &mut Rng, tag: char, lines: usize) -> Vec<u8> {
+    let mut s = String::new();
+    for k in 0..lines {
+        s.push_str(&format!("{tag}-{k}-{}\n", rng.below(1000)));
+    }
+    s.into_bytes()
+}
+
+/// Attribution integrity: `blame` is a materialized view of the append-only
+/// edit-op log, so it must never credit an actor who did not write the file, must
+/// only name registered actors, and must vanish when an *unattributed* write
+/// replaces the content (H7). Driven by seeded multi-actor writes with the
+/// ground truth tracked alongside.
+#[tokio::test]
+async fn blame_is_consistent_with_who_wrote_each_file() {
+    for seed in 0..48u64 {
+        let mut rng = Rng::new(seed);
+        let store = Arc::new(FaultyContentStore::new(true, HashSet::new()));
+        let clock: Arc<dyn Clock> = Arc::new(SimClock::new(1_000_000 + seed as i64));
+        let fs = Fs::with_clock(SqliteMetadataStore::open_in_memory().unwrap(), store, clock);
+        fs.init().await.unwrap();
+
+        let n_actors = 2 + rng.below(2) as usize;
+        let mut actors = Vec::new();
+        for i in 0..n_actors {
+            actors.push(fs.create_human(&format!("a{i}"), None).await.unwrap());
+        }
+
+        // Ground truth: actors that attributed-wrote each path, and paths whose
+        // most recent write was unattributed (must clear blame).
+        let mut wrote: HashMap<&str, HashSet<i64>> = HashMap::new();
+        let mut last_unattributed: HashSet<&str> = HashSet::new();
+
+        for _ in 0..(6 + rng.below(20)) {
+            let path = PATHS[rng.below(PATHS.len() as u64) as usize];
+            if rng.below(10) < 8 {
+                let actor = actors[rng.below(n_actors as u64) as usize];
+                let tag = (b'A' + (actor % 26) as u8) as char;
+                let lines = 1 + rng.below(6) as usize;
+                let data = text_blob(&mut rng, tag, lines);
+                if fs
+                    .write_as(WriteCtx::actor(actor), path, &data)
+                    .await
+                    .is_ok()
+                {
+                    wrote.entry(path).or_default().insert(actor);
+                    last_unattributed.remove(path);
+                }
+            } else {
+                // A plain, unattributed write — must leave the file with no blame.
+                let lines = 1 + rng.below(4) as usize;
+                let data = text_blob(&mut rng, 'Z', lines);
+                if fs.write(path, &data).await.is_ok() {
+                    last_unattributed.insert(path);
+                }
+            }
+        }
+
+        let registered: HashSet<i64> = fs
+            .list_actors()
+            .await
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
+
+        for &path in PATHS {
+            if fs.stat(path).await.is_err() {
+                continue;
+            }
+            let blame = fs.blame(path).await.unwrap();
+            if last_unattributed.contains(path) {
+                assert!(
+                    blame.is_empty(),
+                    "seed {seed}: unattributed write must clear blame for {path}"
+                );
+                continue;
+            }
+            let writers = wrote.get(path).cloned().unwrap_or_default();
+            assert!(
+                !blame.is_empty(),
+                "seed {seed}: attributed file {path} must carry blame"
+            );
+            for r in &blame {
+                assert!(
+                    registered.contains(&r.actor.id),
+                    "seed {seed}: blame on {path} credits unregistered actor {}",
+                    r.actor.id
+                );
+                assert!(
+                    writers.contains(&r.actor.id),
+                    "seed {seed}: blame on {path} credits actor {} who never wrote it",
+                    r.actor.id
+                );
+            }
+        }
+    }
+}
+
+/// GC is a mark-and-sweep, so it must be **safe** (never drop a reachable
+/// object), **complete** (never leave an unreachable one), and **idempotent** (a
+/// second pass finds nothing). Churn — overwrites, removes, commits — leaves
+/// orphaned chunks for it to reclaim.
+#[tokio::test]
+async fn gc_is_safe_complete_and_idempotent() {
+    for seed in 0..48u64 {
+        // Faithful store, no faults, no crash: a clean run to collect over.
+        let (store, fs) = run_sim(seed, true, false, false).await;
+
+        // The live working tree, captured before collection.
+        let mut live = BTreeMap::new();
+        for &p in PATHS {
+            if let Ok(bytes) = fs.read(p).await {
+                live.insert(p, bytes.to_vec());
+            }
+        }
+
+        let first = fs.gc().await.unwrap();
+
+        // Complete: everything still stored is reachable (nothing unreachable
+        // survived, nothing reachable was double-counted).
+        assert_eq!(
+            store.list().await.unwrap().len(),
+            first.reachable,
+            "seed {seed}: post-gc object count != reachable set"
+        );
+
+        // Safe: every live file still reads back, byte-for-byte.
+        for (p, want) in &live {
+            let got = fs.read(p).await.expect("gc dropped a reachable file");
+            assert_eq!(&got[..], &want[..], "seed {seed}: gc corrupted {p}");
+        }
+
+        // Idempotent: a second pass has nothing left to delete.
+        let second = fs.gc().await.unwrap();
+        assert_eq!(
+            second.deleted, 0,
+            "seed {seed}: a second gc deleted {} objects (non-idempotent)",
+            second.deleted
+        );
+    }
+}
+
+/// The content store is the backup: a workspace's committed state must rebuild
+/// from the object graph alone (afs `fsck --rebuild`). Build history, then point a
+/// FRESH metadata DB at the same content store and rebuild — the recovered tree
+/// and branch names must match what was committed.
+#[tokio::test]
+async fn rebuild_round_trips_committed_state_from_content() {
+    for seed in 0..24u64 {
+        let mut rng = Rng::new(seed);
+        let store = Arc::new(FaultyContentStore::new(true, HashSet::new()));
+
+        // Author some history: rounds of writes, each sealed by a commit (so the
+        // working tree ends exactly at the last commit), then maybe a branch.
+        let clock1: Arc<dyn Clock> = Arc::new(SimClock::new(1_000_000 + seed as i64));
+        let fs1 = Fs::with_clock(
+            SqliteMetadataStore::open_in_memory().unwrap(),
+            store.clone(),
+            clock1,
+        );
+        fs1.init().await.unwrap();
+        for _ in 0..(1 + rng.below(4)) {
+            for _ in 0..(1 + rng.below(4)) {
+                let path = PATHS[rng.below(PATHS.len() as u64) as usize];
+                let lines = 1 + rng.below(5) as usize;
+                let data = text_blob(&mut rng, 'X', lines);
+                fs1.write(path, &data).await.unwrap();
+            }
+            fs1.commit("sim", "round").await.unwrap();
+        }
+        if rng.below(2) == 0 {
+            fs1.create_branch("feature").await.unwrap();
+        }
+
+        // Snapshot the committed state (== working tree, since we committed last).
+        let mut committed = BTreeMap::new();
+        for &p in PATHS {
+            if let Ok(bytes) = fs1.read(p).await {
+                committed.insert(p.to_string(), bytes.to_vec());
+            }
+        }
+        let mut branches1: Vec<String> = fs1
+            .list_branches()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        branches1.sort();
+
+        // Catastrophe: the metadata DB is gone. A fresh, empty DB over the SAME
+        // content store rebuilds from the object graph + ref mirror alone.
+        let clock2: Arc<dyn Clock> = Arc::new(SimClock::new(2_000_000 + seed as i64));
+        let fs2 = Fs::with_clock(
+            SqliteMetadataStore::open_in_memory().unwrap(),
+            store.clone(),
+            clock2,
+        );
+        fs2.init().await.unwrap();
+        let report = fs2.rebuild_from_content().await.unwrap();
+        assert!(
+            report.used_mirror,
+            "seed {seed}: committed via the engine, so the ref mirror should exist"
+        );
+
+        let mut recovered = BTreeMap::new();
+        for &p in PATHS {
+            if let Ok(bytes) = fs2.read(p).await {
+                recovered.insert(p.to_string(), bytes.to_vec());
+            }
+        }
+        assert_eq!(
+            recovered, committed,
+            "seed {seed}: rebuilt working tree != committed state"
+        );
+
+        let mut branches2: Vec<String> = fs2
+            .list_branches()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        branches2.sort();
+        assert_eq!(
+            branches2, branches1,
+            "seed {seed}: recovered branch names differ"
+        );
+    }
+}
